@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use crate::arbiter::HoldReason;
 use crate::feeds::Feed;
+use crate::limits::{SlowReason, TorrentLimits};
 use crate::net::Interface;
 use crate::store::Settings;
 
@@ -93,6 +94,7 @@ pub struct TorrentView {
     pub trackers: Arc<Vec<String>>,
     /// Filled only for the torrent the front end is showing details for.
     pub peers: Vec<PeerView>,
+    pub limits: TorrentLimits,
 }
 
 impl TorrentView {
@@ -148,4 +150,6 @@ pub struct Snapshot {
     pub remote_on: bool,
     /// Why the remote-control page could not be served.
     pub remote_error: Option<String>,
+    /// Whether slow mode is on, and why.
+    pub slow: Option<SlowReason>,
 }

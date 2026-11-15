@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::arbiter::Intent;
 use crate::feeds::Feed;
+use crate::limits::{LimitSettings, Seeding};
 use crate::rules::Schedule;
 
 pub const SCHEMA_VERSION: u32 = 1;
@@ -35,6 +36,8 @@ pub struct Settings {
     /// all while it is not connected. `None` uses whatever connection the system has.
     pub bind_interface: Option<String>,
     pub remote: RemoteSettings,
+    /// Slow mode, seeding time limits, queue limits and peers per torrent.
+    pub limits: LimitSettings,
 }
 
 /// Remote control from a browser. Off until the user turns it on and sets a password.
@@ -84,6 +87,7 @@ impl Default for Settings {
             watch_dir: None,
             bind_interface: None,
             remote: RemoteSettings::default(),
+            limits: LimitSettings::default(),
         }
     }
 }
@@ -111,6 +115,8 @@ pub struct Record {
     pub total: u64,
     pub done: u64,
     pub finished: bool,
+    /// How long it has seeded, and its own seeding time limits.
+    pub seeding: Seeding,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
@@ -272,6 +278,12 @@ mod tests {
                 total: 100,
                 done: 60,
                 finished: false,
+                seeding: Seeding {
+                    time_limit_min: Some(30),
+                    idle_limit_min: None,
+                    secs: 90,
+                    idle_secs: 12,
+                },
             },
         );
         store.save().unwrap();

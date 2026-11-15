@@ -28,6 +28,7 @@ use chrono::{Datelike, Timelike};
 use crate::arbiter::{decide, Decision, HoldReason, Intent};
 use crate::feeds::{self, Feed};
 use crate::intake::{self, Source};
+use crate::limits::{LimitSettings, TorrentLimits};
 use crate::model::{FeedView, FileMeta, Notice, PeerView, Snapshot, State, TorrentView};
 use crate::net::{self, Interface};
 use crate::rules::{self, Clock, Move, Schedule};
@@ -102,6 +103,18 @@ pub enum Command {
     /// The torrent whose peers the front end wants to see.
     Watch(Option<String>),
     Shutdown,
+    /// Turn slow mode on or off by hand.
+    SetSlowMode(bool),
+    /// Slow mode's limits and schedule, seeding time limits, queue limits and peers per
+    /// torrent. Whether slow mode is on by hand is left as it is.
+    SetLimitSettings(LimitSettings),
+    /// Seeding time limits in minutes for these torrents alone. `None` uses the ones in
+    /// the settings; 0 means no limit.
+    SetSeedingLimits {
+        keys: Vec<String>,
+        time_limit_min: Option<u32>,
+        idle_limit_min: Option<u32>,
+    },
 }
 
 type Handle = Arc<ManagedTorrent>;
@@ -185,7 +198,18 @@ struct Worker {
     remote_task: Option<tokio::task::JoinHandle<()>>,
     remote_error: Option<String>,
     remote_try: Option<Instant>,
+    /// Seeding time is counted in whole seconds up to here.
+    seed_clock: Instant,
+    /// Since when each running torrent has been slower than the slow-torrent speeds.
+    slow_since: HashMap<String, Instant>,
+    /// The speed limits last given to the engine, in KiB/s. `None` sets them again.
+    applied_limits: Option<(u32, u32)>,
+    /// The peers per torrent the running session was started with.
+    session_peers: u32,
 }
+
+/// How long a torrent must stay below the slow-torrent speeds to count as slow.
+const SLOW_AFTER: Duration = Duration::from_secs(60);
 
 pub(crate) fn run(
     data_dir: PathBuf,
@@ -257,6 +281,10 @@ async fn main_loop(
         remote_task: None,
         remote_error: None,
         remote_try: None,
+        seed_clock: Instant::now(),
+        slow_since: HashMap::new(),
+        applied_limits: None,
+        session_peers: 0,
     };
     if let Some(note) = note {
         w.notice(note, true);
@@ -416,6 +444,8 @@ impl Worker {
         self.bound = None;
         self.bound_index = None;
         self.last_up.clear();
+        self.slow_since.clear();
+        self.applied_limits = None;
     }
 
     async fn start_session(&mut self, bind: Option<String>) -> anyhow::Result<()> {
@@ -435,8 +465,13 @@ impl Worker {
             },
             client_name_and_version: Some(format!("RustTorrent {}", crate::VERSION)),
             bind_device_name: bind.clone(),
+            peer_limit: match settings.limits.peers_per_torrent {
+                0 => None,
+                n => Some(n as usize),
+            },
             ..Default::default()
         };
+        let peers = settings.limits.peers_per_torrent;
         // Read before the session starts: if the interface is replaced while it starts,
         // the next look sees a different number and starts again.
         let index = bind.as_deref().and_then(net::index);
@@ -445,6 +480,7 @@ impl Worker {
         self.session = Some(session);
         self.bound = bind;
         self.bound_index = index;
+        self.session_peers = peers;
         for i in 0..self.pending.len() {
             if self.pending[i].task.is_none() {
                 let p = &self.pending[i];
@@ -465,7 +501,9 @@ impl Worker {
             .is_none_or(|name| self.interfaces.iter().any(|i| i.name == *name));
         if self.session.is_some() {
             let replaced = wanted.is_some() && wanted.as_deref().and_then(net::index) != self.bound_index;
-            if self.bound == wanted && up && !replaced {
+            // The engine takes the number of peers per torrent only when it starts.
+            let peers = self.session_peers == self.store.data.settings.limits.peers_per_torrent;
+            if self.bound == wanted && up && !replaced && peers {
                 return;
             }
             self.stop_session().await;
@@ -544,6 +582,10 @@ impl Worker {
                 selected: None,
                 trackers: self.meta.get(key).map(|m| m.trackers.clone()).unwrap_or_default(),
                 peers: Vec::new(),
+                limits: TorrentLimits {
+                    seeding: record.seeding,
+                    ..Default::default()
+                },
             })
             .collect()
     }
@@ -599,6 +641,8 @@ impl Worker {
             queue_pos: record.queue_pos,
             added_at: record.added_at,
             ratio_limit_pct: record.ratio_limit_pct,
+            seeding: record.seeding,
+            slow: self.slow_since.get(key).is_some_and(|t| t.elapsed() >= SLOW_AFTER),
         }
     }
 
@@ -606,6 +650,10 @@ impl Worker {
         for key in keys {
             if let Some(record) = self.store.data.torrents.get_mut(key) {
                 record.intent = intent;
+                // Resuming starts the time without uploads again.
+                if intent == Intent::Run {
+                    record.seeding.idle_secs = 0;
+                }
             }
         }
         self.save();
@@ -683,6 +731,7 @@ impl Worker {
                         Ok(()) => {
                             self.store.data.torrents.remove(&key);
                             self.last_up.remove(&key);
+                            self.slow_since.remove(&key);
                             self.meta.remove(&key);
                             let what = if delete_files {
                                 "Removed and deleted files of"
@@ -714,6 +763,8 @@ impl Worker {
                     session.ratelimits.set_download_bps(limit(down_kib));
                     session.ratelimits.set_upload_bps(limit(up_kib));
                 }
+                // Slow mode may be on; the next look sets the limits that apply.
+                self.applied_limits = None;
                 self.save();
             }
             Command::SetDownloadDir(dir) => {
@@ -850,6 +901,32 @@ impl Worker {
             }
             Command::Watch(key) => self.watched = key,
             Command::Shutdown => {}
+            Command::SetSlowMode(on) => {
+                rules::set_slow_mode(&mut self.store.data.settings.limits.slow, on, local_clock());
+                self.save();
+            }
+            Command::SetLimitSettings(mut limits) => {
+                let settings = &mut self.store.data.settings;
+                // The switch is changed with its own command only.
+                limits.slow.on = settings.limits.slow.on;
+                limits.slow.skipped =
+                    settings.limits.slow.skipped && limits.slow.schedule == settings.limits.slow.schedule;
+                settings.limits = limits;
+                self.save();
+            }
+            Command::SetSeedingLimits {
+                keys,
+                time_limit_min,
+                idle_limit_min,
+            } => {
+                for key in keys {
+                    if let Some(record) = self.store.data.torrents.get_mut(&key) {
+                        record.seeding.time_limit_min = time_limit_min;
+                        record.seeding.idle_limit_min = idle_limit_min;
+                    }
+                }
+                self.save();
+            }
         }
     }
 
@@ -1027,12 +1104,21 @@ impl Worker {
 
         let mut torrents = Vec::new();
         let (mut down_total, mut up_total) = (0, 0);
-        let now = chrono::Local::now();
-        let clock = Clock {
-            weekday: now.weekday().num_days_from_monday() as u8,
-            minute: (now.hour() * 60 + now.minute()) as u16,
-        };
+        let clock = local_clock();
         let schedule_off = !self.store.data.settings.schedule.allows(clock);
+        if rules::slow_mode_tick(&mut self.store.data.settings.limits.slow, clock) {
+            self.dirty = true;
+        }
+        let (down_kib, up_kib, slow) = rules::speed_limits(&self.store.data.settings, clock);
+        if let Some(session) = &self.session {
+            if self.applied_limits != Some((down_kib, up_kib)) {
+                session.ratelimits.set_download_bps(limit(down_kib));
+                session.ratelimits.set_upload_bps(limit(up_kib));
+                self.applied_limits = Some((down_kib, up_kib));
+            }
+        }
+        let seed_secs = self.seed_clock.elapsed().as_secs();
+        self.seed_clock += Duration::from_secs(seed_secs);
 
         if let Some(session) = self.session.clone() {
             // First look at every torrent, then let the rules see them all together.
@@ -1057,7 +1143,9 @@ impl Worker {
                     self.dirty = true;
                 }
                 let live = matches!(stats.state, TorrentStatsState::Live);
+                let before = self.store.data.torrents.get(&key).map_or(0, |r| r.uploaded);
                 self.count_upload(&key, live, stats.uploaded_bytes);
+                self.watch_limits(&key, &stats, live, seed_secs, before);
                 // Remember what the list shows, for when the engine is not running.
                 if let Some(record) = self.store.data.torrents.get_mut(&key) {
                     let name = handle.name().unwrap_or_default();
@@ -1153,6 +1241,11 @@ impl Worker {
                     selected: handle.only_files(),
                     trackers,
                     peers,
+                    limits: TorrentLimits {
+                        seeding: record.seeding,
+                        stop: outcome.seed_stop,
+                        slow: self.slow_since.get(&key).is_some_and(|t| t.elapsed() >= SLOW_AFTER),
+                    },
                     key,
                 });
             }
@@ -1186,6 +1279,7 @@ impl Worker {
                 selected: None,
                 trackers: Arc::default(),
                 peers: Vec::new(),
+                limits: TorrentLimits::default(),
             });
         }
 
@@ -1228,6 +1322,7 @@ impl Worker {
             interfaces: self.interfaces.clone(),
             remote_on: self.remote_task.is_some(),
             remote_error: self.remote_error.clone(),
+            slow,
         };
         let mut current = self.shared.lock().unwrap_or_else(|e| e.into_inner());
         if **current != snapshot {
@@ -1235,6 +1330,41 @@ impl Worker {
             drop(current);
             (self.on_change)();
         }
+    }
+}
+
+impl Worker {
+    /// Counts seeding time and notes which torrents are slow.
+    fn watch_limits(&mut self, key: &str, stats: &librqbit::TorrentStats, live: bool, secs: u64, before: u64) {
+        let limits = self.store.data.settings.limits;
+        let slow = stats.live.as_ref().is_some_and(|l| {
+            l.download_speed.as_bytes() < limits.slow_down_kib as u64 * 1024
+                && l.upload_speed.as_bytes() < limits.slow_up_kib as u64 * 1024
+        });
+        if live && slow {
+            self.slow_since.entry(key.to_owned()).or_insert_with(Instant::now);
+        } else {
+            self.slow_since.remove(key);
+        }
+        if !live || !stats.finished {
+            return;
+        }
+        if let Some(record) = self.store.data.torrents.get_mut(key) {
+            let uploaded = record.uploaded > before;
+            rules::seed_tick(&mut record.seeding, secs, uploaded);
+            if secs > 0 {
+                self.dirty = true;
+            }
+        }
+    }
+}
+
+/// Local time, as the schedules need it.
+fn local_clock() -> Clock {
+    let now = chrono::Local::now();
+    Clock {
+        weekday: now.weekday().num_days_from_monday() as u8,
+        minute: (now.hour() * 60 + now.minute()) as u16,
     }
 }
 
