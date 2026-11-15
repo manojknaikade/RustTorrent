@@ -4642,7 +4642,7 @@ dependencies = [
 
 [[package]]
 name = "rusttorrent"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "eframe",
  "egui_extras",
@@ -4655,9 +4655,10 @@ dependencies = [
 
 [[package]]
 name = "rusttorrent-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "dirs",
  "librqbit",
  "serde",

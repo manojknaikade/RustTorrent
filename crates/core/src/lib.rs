@@ -8,14 +8,17 @@ mod engine;
 pub mod format;
 pub mod intake;
 pub mod model;
+pub mod rules;
 pub mod store;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+pub use arbiter::HoldReason;
 pub use engine::Command;
 pub use model::{FileMeta, Notice, PeerView, Snapshot, State, TorrentView};
+pub use rules::{Move, Schedule};
 pub use store::Settings;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

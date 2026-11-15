@@ -11,6 +11,7 @@ use anyhow::{bail, Context};
 use serde::{Deserialize, Serialize};
 
 use crate::arbiter::Intent;
+use crate::rules::Schedule;
 
 pub const SCHEMA_VERSION: u32 = 1;
 
@@ -22,6 +23,11 @@ pub struct Settings {
     pub down_limit_kib: u32,
     /// Upload limit in KiB/s. 0 means no limit.
     pub up_limit_kib: u32,
+    /// How many torrents may download at once. 0 means no limit.
+    pub max_downloads: u32,
+    /// Stop seeding at this ratio, in percent (150 is a ratio of 1.5). 0 means no limit.
+    pub ratio_limit_pct: u32,
+    pub schedule: Schedule,
 }
 
 impl Default for Settings {
@@ -33,6 +39,9 @@ impl Default for Settings {
             download_dir,
             down_limit_kib: 0,
             up_limit_kib: 0,
+            max_downloads: 0,
+            ratio_limit_pct: 0,
+            schedule: Schedule::default(),
         }
     }
 }
@@ -46,6 +55,12 @@ pub struct Record {
     pub uploaded: u64,
     /// Seconds since 1970.
     pub added_at: u64,
+    /// Place in the download queue; lower downloads first. 0 for torrents added before
+    /// the queue existed, which are ordered by `added_at`.
+    pub queue_pos: u64,
+    /// This torrent's own ratio limit in percent, instead of the one in the settings.
+    /// 0 means no limit.
+    pub ratio_limit_pct: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -159,6 +174,8 @@ mod tests {
         let path = temp("roundtrip");
         let (mut store, _) = Store::load(&path).unwrap();
         store.data.settings.down_limit_kib = 512;
+        store.data.settings.max_downloads = 2;
+        store.data.settings.schedule.enabled = true;
         store.data.pending.push("magnet:?xt=urn:btih:abc".into());
         store.data.torrents.insert(
             "00112233".into(),
@@ -167,6 +184,8 @@ mod tests {
                 category: Some("Linux".into()),
                 uploaded: 42,
                 added_at: 7,
+                queue_pos: 3,
+                ratio_limit_pct: Some(200),
             },
         );
         store.save().unwrap();

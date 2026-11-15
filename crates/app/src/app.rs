@@ -4,13 +4,14 @@ use std::sync::Arc;
 
 use eframe::egui::{self, Color32, RichText, Sense};
 use egui_extras::{Column, TableBuilder};
-use rusttorrent_core::{format, Command, Core, Snapshot, State, TorrentView};
+use rusttorrent_core::{format, Command, Core, HoldReason, Move, Schedule, Snapshot, State, TorrentView};
 
 fn color(state: State) -> Color32 {
     match state {
         State::Downloading => Color32::from_rgb(64, 156, 255),
         State::Seeding => Color32::from_rgb(52, 199, 123),
         State::Paused => Color32::from_rgb(150, 150, 158),
+        State::Queued | State::Scheduled => Color32::from_rgb(170, 140, 235),
         State::FetchingInfo | State::Checking => Color32::from_rgb(230, 170, 60),
         State::Completed => Color32::from_rgb(120, 200, 190),
         State::Error => Color32::from_rgb(240, 90, 90),
@@ -22,16 +23,18 @@ enum Filter {
     All,
     Downloading,
     Seeding,
+    Queued,
     Paused,
     Completed,
     Error,
 }
 
 impl Filter {
-    const ALL: [Filter; 6] = [
+    const ALL: [Filter; 7] = [
         Filter::All,
         Filter::Downloading,
         Filter::Seeding,
+        Filter::Queued,
         Filter::Paused,
         Filter::Completed,
         Filter::Error,
@@ -42,6 +45,7 @@ impl Filter {
             Filter::All => "All",
             Filter::Downloading => "Downloading",
             Filter::Seeding => "Seeding",
+            Filter::Queued => "Queued",
             Filter::Paused => "Paused",
             Filter::Completed => "Completed",
             Filter::Error => "Error",
@@ -53,6 +57,7 @@ impl Filter {
             Filter::All => return None,
             Filter::Downloading => State::Downloading,
             Filter::Seeding => State::Seeding,
+            Filter::Queued => State::Queued,
             Filter::Paused => State::Paused,
             Filter::Completed => State::Completed,
             Filter::Error => State::Error,
@@ -64,6 +69,7 @@ impl Filter {
             Filter::All => true,
             Filter::Downloading => matches!(state, State::Downloading | State::FetchingInfo | State::Checking),
             Filter::Seeding => state == State::Seeding,
+            Filter::Queued => matches!(state, State::Queued | State::Scheduled),
             Filter::Paused => state == State::Paused,
             Filter::Completed => state == State::Completed,
             Filter::Error => state == State::Error,
@@ -88,6 +94,61 @@ struct RemoveDialog {
 struct SettingsDialog {
     down_kib: u32,
     up_kib: u32,
+    max_downloads: u32,
+    ratio_on: bool,
+    /// The ratio itself (1.5), not the percent the core stores.
+    ratio: f32,
+    schedule: Schedule,
+}
+
+impl SettingsDialog {
+    fn of(s: &rusttorrent_core::Settings) -> Self {
+        Self {
+            down_kib: s.down_limit_kib,
+            up_kib: s.up_limit_kib,
+            max_downloads: s.max_downloads,
+            ratio_on: s.ratio_limit_pct > 0,
+            ratio: if s.ratio_limit_pct > 0 {
+                s.ratio_limit_pct as f32 / 100.0
+            } else {
+                1.0
+            },
+            schedule: s.schedule,
+        }
+    }
+}
+
+const DAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+fn clock_text(min: u16) -> String {
+    format!("{:02}:{:02}", min / 60, min % 60)
+}
+
+/// Hour and minute boxes for a time kept as minutes after midnight.
+fn time_edit(ui: &mut egui::Ui, min: &mut u16) {
+    let (mut h, mut m) = (*min / 60, *min % 60);
+    ui.add(
+        egui::DragValue::new(&mut h)
+            .range(0..=23)
+            .speed(0.1)
+            .custom_formatter(|v, _| format!("{v:02}")),
+    );
+    ui.label(":");
+    ui.add(
+        egui::DragValue::new(&mut m)
+            .range(0..=59)
+            .speed(0.2)
+            .custom_formatter(|v, _| format!("{v:02}")),
+    );
+    *min = h * 60 + m;
+}
+
+fn ratio_limit_text(pct: u32) -> String {
+    if pct == 0 {
+        "none".to_owned()
+    } else {
+        format!("{:.2}", pct as f64 / 100.0)
+    }
 }
 
 pub struct App {
@@ -143,6 +204,8 @@ const REVEAL: &str = if cfg!(target_os = "macos") {
 fn bar(ui: &mut egui::Ui, t: &TorrentView) {
     let text = match t.state {
         State::FetchingInfo => "Fetching info".to_owned(),
+        State::Queued => format!("Queued  {:.0}%", t.progress() * 100.0),
+        State::Scheduled => format!("Scheduled  {:.0}%", t.progress() * 100.0),
         _ => format!("{:.1}%", t.progress() * 100.0),
     };
     ui.add(
@@ -187,14 +250,15 @@ impl App {
         self.view.sort_by(|&a, &b| {
             let (a, b) = (&all[a], &all[b]);
             let order = match col {
-                1 => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
-                2 => a.progress().total_cmp(&b.progress()),
-                3 => a.total.cmp(&b.total),
-                4 => a.down_bps.cmp(&b.down_bps),
-                5 => a.up_bps.cmp(&b.up_bps),
-                6 => secs_left(a).cmp(&secs_left(b)),
-                7 => a.peers_live.cmp(&b.peers_live),
-                8 => ratio_of(a).total_cmp(&ratio_of(b)),
+                1 => a.queue_pos.unwrap_or(u32::MAX).cmp(&b.queue_pos.unwrap_or(u32::MAX)),
+                2 => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+                3 => a.progress().total_cmp(&b.progress()),
+                4 => a.total.cmp(&b.total),
+                5 => a.down_bps.cmp(&b.down_bps),
+                6 => a.up_bps.cmp(&b.up_bps),
+                7 => secs_left(a).cmp(&secs_left(b)),
+                8 => a.peers_live.cmp(&b.peers_live),
+                9 => ratio_of(a).total_cmp(&ratio_of(b)),
                 _ => a.added_at.cmp(&b.added_at),
             };
             let order = if asc { order } else { order.reverse() };
@@ -251,10 +315,7 @@ impl App {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("Settings").clicked() {
                     let s = &self.snap.settings;
-                    self.settings = Some(SettingsDialog {
-                        down_kib: s.down_limit_kib,
-                        up_kib: s.up_limit_kib,
-                    });
+                    self.settings = Some(SettingsDialog::of(s));
                 }
                 ui.separator();
                 ui.label(format!("↑ {}", format::speed(self.snap.up_bps)));
@@ -289,6 +350,13 @@ impl App {
                 };
                 let text = format!("Limits: ↓ {}  ↑ {}", limit(s.down_limit_kib), limit(s.up_limit_kib));
                 ui.label(RichText::new(text).small().weak());
+                if self.snap.schedule_off {
+                    let text = format!(
+                        "Transfers are off by schedule until {}",
+                        clock_text(s.schedule.start_min)
+                    );
+                    ui.label(RichText::new(text).small().color(color(State::Scheduled)));
+                }
             });
         });
         ui.add_space(3.0);
@@ -404,6 +472,27 @@ impl App {
                         ("Added", format!("{age} ago")),
                     ],
                 );
+                let limit = t.ratio_limit_pct.unwrap_or(self.snap.settings.ratio_limit_pct);
+                let own = if t.ratio_limit_pct.is_some() {
+                    " (this torrent)"
+                } else {
+                    ""
+                };
+                let waiting = match t.held {
+                    None => "–",
+                    Some(HoldReason::Queue) => "A free download slot",
+                    Some(HoldReason::Schedule) => "The schedule",
+                    Some(HoldReason::Ratio) => "Nothing: ratio limit reached",
+                    Some(HoldReason::Network) => "The network",
+                };
+                row(
+                    ui,
+                    [
+                        ("Queue place", t.queue_pos.map_or("–".to_owned(), |p| p.to_string())),
+                        ("Ratio limit", format!("{}{own}", ratio_limit_text(limit))),
+                        ("Waiting for", waiting.to_owned()),
+                    ],
+                );
             });
         ui.add_space(4.0);
         ui.horizontal(|ui| {
@@ -438,6 +527,13 @@ impl App {
                 change = Some((0..n).collect());
             }
         });
+        if n > 1 || t.done < t.total {
+            ui.label(
+                RichText::new("Downloads in order: files one after another by name, each from its start to its end.")
+                    .small()
+                    .weak(),
+            );
+        }
         egui::ScrollArea::vertical()
             .auto_shrink(false)
             .show_rows(ui, 20.0, n, |ui, range| {
@@ -491,6 +587,7 @@ impl App {
         }
         let heads = [
             "",
+            "#",
             "Name",
             "Progress",
             "Size",
@@ -510,6 +607,7 @@ impl App {
             .sense(Sense::click())
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
             .column(Column::exact(14.0))
+            .column(Column::exact(30.0))
             .column(Column::remainder().at_least(200.0).clip(true))
             .column(Column::exact(150.0))
             .column(Column::exact(80.0))
@@ -534,7 +632,7 @@ impl App {
                         let label =
                             egui::Label::new(RichText::new(format!("{name}{mark}")).strong()).sense(Sense::click());
                         if ui.add(label).clicked() && i > 0 {
-                            sort = if sort.0 == i { (i, !sort.1) } else { (i, i == 1) };
+                            sort = if sort.0 == i { (i, !sort.1) } else { (i, i <= 2) };
                         }
                     });
                 }
@@ -546,6 +644,11 @@ impl App {
                     row.set_selected(selected.contains(&t.key));
                     row.col(|ui| {
                         ui.label(RichText::new("●").color(color(t.state)));
+                    });
+                    row.col(|ui| {
+                        if let Some(p) = t.queue_pos {
+                            ui.label(RichText::new(p.to_string()).weak());
+                        }
                     });
                     row.col(|ui| {
                         ui.add(egui::Label::new(&t.name).truncate().selectable(false));
@@ -578,7 +681,12 @@ impl App {
                         clicked = Some(idx);
                     }
                     response.context_menu(|ui| {
-                        let key = vec![t.key.clone()];
+                        // Acts on the whole selection when the row is part of it.
+                        let key = if selected.contains(&t.key) {
+                            selected.clone()
+                        } else {
+                            vec![t.key.clone()]
+                        };
                         if ui.button("Pause").clicked() {
                             action = Some((Command::Pause(key.clone()), false));
                             ui.close();
@@ -591,6 +699,40 @@ impl App {
                             reveal(&t.save_path);
                             ui.close();
                         }
+                        ui.separator();
+                        ui.menu_button("Queue", |ui| {
+                            for (name, how) in [
+                                ("Move to top", Move::Top),
+                                ("Move up", Move::Up),
+                                ("Move down", Move::Down),
+                                ("Move to bottom", Move::Bottom),
+                            ] {
+                                if ui.button(name).clicked() {
+                                    action = Some((Command::MoveInQueue { keys: key.clone(), how }, false));
+                                    ui.close();
+                                }
+                            }
+                        });
+                        ui.menu_button("Ratio limit", |ui| {
+                            for (name, limit) in [
+                                ("Use the setting", None),
+                                ("No limit", Some(0)),
+                                ("Stop at 1.0", Some(100)),
+                                ("Stop at 2.0", Some(200)),
+                                ("Stop at 3.0", Some(300)),
+                            ] {
+                                if ui.radio(t.ratio_limit_pct == limit, name).clicked() {
+                                    action = Some((
+                                        Command::SetRatioLimit {
+                                            keys: key.clone(),
+                                            limit,
+                                        },
+                                        false,
+                                    ));
+                                    ui.close();
+                                }
+                            }
+                        });
                         ui.separator();
                         if ui.button("Remove…").clicked() {
                             action = Some((
@@ -779,6 +921,57 @@ impl App {
                         ui.end_row();
                     });
                 ui.add_space(8.0);
+                ui.label(RichText::new("Queue and seeding").weak());
+                egui::Grid::new("rules")
+                    .num_columns(2)
+                    .spacing([12.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.label("Downloads at once");
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                egui::DragValue::new(&mut dialog.max_downloads)
+                                    .range(0..=100)
+                                    .speed(0.1),
+                            );
+                            ui.label(RichText::new("0 means no limit").weak());
+                        });
+                        ui.end_row();
+                        ui.checkbox(&mut dialog.ratio_on, "Stop seeding at ratio");
+                        ui.add_enabled(
+                            dialog.ratio_on,
+                            egui::DragValue::new(&mut dialog.ratio)
+                                .range(0.1..=100.0)
+                                .speed(0.05)
+                                .fixed_decimals(2),
+                        );
+                        ui.end_row();
+                    });
+                ui.add_space(8.0);
+                let sch = &mut dialog.schedule;
+                ui.checkbox(&mut sch.enabled, "Transfer only at these times");
+                ui.add_enabled_ui(sch.enabled, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("From");
+                        time_edit(ui, &mut sch.start_min);
+                        ui.label("to");
+                        time_edit(ui, &mut sch.end_min);
+                        if sch.start_min > sch.end_min {
+                            ui.label(RichText::new("the next day").weak());
+                        } else if sch.start_min == sch.end_min {
+                            ui.label(RichText::new("the whole day").weak());
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Starting on");
+                        for (i, day) in DAYS.iter().enumerate() {
+                            let bit = 1u8 << i;
+                            if ui.selectable_label(sch.days & bit != 0, *day).clicked() {
+                                sch.days ^= bit;
+                            }
+                        }
+                    });
+                });
+                ui.add_space(8.0);
                 ui.label(
                     RichText::new(format!("RustTorrent {}", rusttorrent_core::VERSION))
                         .small()
@@ -798,6 +991,15 @@ impl App {
                 core.send(Command::SetLimits {
                     down_kib: dialog.down_kib,
                     up_kib: dialog.up_kib,
+                });
+                core.send(Command::SetRules {
+                    max_downloads: dialog.max_downloads,
+                    ratio_limit_pct: if dialog.ratio_on {
+                        (dialog.ratio * 100.0).round() as u32
+                    } else {
+                        0
+                    },
+                    schedule: dialog.schedule,
                 });
                 close = true;
             }
@@ -911,6 +1113,9 @@ impl eframe::App for App {
                 let key = self.snap.torrents[first].key.clone();
                 self.selected = vec![key.clone()];
                 self.focus = Some(key);
+                if tab == "settings" {
+                    self.settings = Some(SettingsDialog::of(&self.snap.settings));
+                }
                 self.tab = match tab.as_str() {
                     "files" => Tab::Files,
                     "peers" => Tab::Peers,

@@ -18,9 +18,12 @@ use librqbit::{
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
-use crate::arbiter::{decide, Decision, Holds, Intent};
+use chrono::{Datelike, Timelike};
+
+use crate::arbiter::{decide, Decision, HoldReason, Intent};
 use crate::intake::{self, Source};
 use crate::model::{FileMeta, Notice, PeerView, Snapshot, State, TorrentView};
+use crate::rules::{self, Clock, Move, Schedule};
 use crate::store::{Record, Store};
 use crate::{now_secs, Shared};
 
@@ -45,6 +48,23 @@ pub enum Command {
         up_kib: u32,
     },
     SetDownloadDir(PathBuf),
+    /// How many torrents download at once, the ratio limit in percent and the schedule.
+    /// 0 means no limit.
+    SetRules {
+        max_downloads: u32,
+        ratio_limit_pct: u32,
+        schedule: Schedule,
+    },
+    /// A ratio limit in percent for these torrents alone. `None` uses the one in the
+    /// settings; 0 means no limit.
+    SetRatioLimit {
+        keys: Vec<String>,
+        limit: Option<u32>,
+    },
+    MoveInQueue {
+        keys: Vec<String>,
+        how: Move,
+    },
     /// The torrent whose peers the front end wants to see.
     Watch(Option<String>),
     Shutdown,
@@ -300,11 +320,13 @@ impl Worker {
         self.store.data.pending.retain(|t| *t != done.text);
         match done.result {
             Ok((key, name, false)) => {
+                let queue_pos = self.next_queue_pos();
                 self.store.data.torrents.insert(
                     key,
                     Record {
                         intent: Intent::Run,
                         added_at: now_secs(),
+                        queue_pos,
                         ..Default::default()
                     },
                 );
@@ -314,6 +336,33 @@ impl Worker {
             Err(e) => self.notice(format!("Could not add {}: {e}", done.label), true),
         }
         self.save();
+    }
+
+    /// The place after the last one in the queue.
+    fn next_queue_pos(&self) -> u64 {
+        self.store
+            .data
+            .torrents
+            .values()
+            .map(|r| r.queue_pos)
+            .max()
+            .unwrap_or(0)
+            + 1
+    }
+
+    fn item(&self, key: &str, stats: &librqbit::TorrentStats) -> rules::Item {
+        let record = self.store.data.torrents.get(key).cloned().unwrap_or_default();
+        rules::Item {
+            key: key.to_owned(),
+            intent: record.intent,
+            finished: stats.finished,
+            settled: matches!(stats.state, TorrentStatsState::Live | TorrentStatsState::Paused),
+            done: stats.progress_bytes,
+            uploaded: record.uploaded,
+            queue_pos: record.queue_pos,
+            added_at: record.added_at,
+            ratio_limit_pct: record.ratio_limit_pct,
+        }
     }
 
     fn set_intent(&mut self, keys: &[String], intent: Intent) {
@@ -380,6 +429,38 @@ impl Worker {
             }
             Command::SetDownloadDir(dir) => {
                 self.store.data.settings.download_dir = dir;
+                self.save();
+            }
+            Command::SetRules {
+                max_downloads,
+                ratio_limit_pct,
+                schedule,
+            } => {
+                let settings = &mut self.store.data.settings;
+                settings.max_downloads = max_downloads;
+                settings.ratio_limit_pct = ratio_limit_pct;
+                settings.schedule = schedule;
+                self.save();
+            }
+            Command::SetRatioLimit { keys, limit } => {
+                for key in keys {
+                    if let Some(record) = self.store.data.torrents.get_mut(&key) {
+                        record.ratio_limit_pct = limit;
+                    }
+                }
+                self.save();
+            }
+            Command::MoveInQueue { keys, how } => {
+                let items: Vec<rules::Item> = self
+                    .handles()
+                    .iter()
+                    .map(|h| self.item(&h.info_hash().as_string(), &h.stats()))
+                    .collect();
+                for (i, key) in rules::reorder(&items, &keys, how).into_iter().enumerate() {
+                    if let Some(record) = self.store.data.torrents.get_mut(&key) {
+                        record.queue_pos = i as u64 + 1;
+                    }
+                }
                 self.save();
             }
             Command::Watch(key) => self.watched = key,
@@ -451,10 +532,13 @@ impl Worker {
         let mut torrents = Vec::new();
         let (mut down_total, mut up_total) = (0, 0);
 
+        // First look at every torrent, then let the rules see them all together.
+        let mut rows = Vec::new();
         for handle in self.handles() {
             let key = handle.info_hash().as_string();
             let stats = handle.stats();
             if !self.store.data.torrents.contains_key(&key) {
+                let queue_pos = self.next_queue_pos();
                 // The engine knows a torrent the store does not (for example the state file
                 // was lost). Keep it as it is rather than starting or stopping it.
                 let intent = if handle.is_paused() { Intent::Pause } else { Intent::Run };
@@ -463,6 +547,7 @@ impl Worker {
                     Record {
                         intent,
                         added_at: now_secs(),
+                        queue_pos,
                         ..Default::default()
                     },
                 );
@@ -470,10 +555,26 @@ impl Worker {
             }
             let live = matches!(stats.state, TorrentStatsState::Live);
             self.count_upload(&key, live, stats.uploaded_bytes);
+            rows.push((handle, key, stats));
+        }
+        let items: Vec<rules::Item> = rows.iter().map(|(_, key, stats)| self.item(key, stats)).collect();
+        let now = chrono::Local::now();
+        let clock = Clock {
+            weekday: now.weekday().num_days_from_monday() as u8,
+            minute: (now.hour() * 60 + now.minute()) as u16,
+        };
+        let outcomes = rules::apply(&items, &self.store.data.settings, clock);
+        let schedule_off = !self.store.data.settings.schedule.allows(clock);
 
+        for ((handle, key, stats), outcome) in rows.into_iter().zip(outcomes) {
             // Make the engine match what the arbiter decides.
             let intent = self.store.data.torrents[&key].intent;
-            let should_run = decide(intent, Holds::default()) == Decision::Run;
+            let decision = decide(intent, outcome.holds);
+            let should_run = decision == Decision::Run;
+            let held = match decision {
+                Decision::Held(reason) => Some(reason),
+                _ => None,
+            };
             let fix = match stats.state {
                 TorrentStatsState::Live if !should_run => Some((self.session.pause(&handle).await, Intent::Run)),
                 TorrentStatsState::Paused if should_run => Some((self.session.unpause(&handle).await, Intent::Pause)),
@@ -494,6 +595,8 @@ impl Worker {
                 TorrentStatsState::Initializing { .. } => State::Checking,
                 TorrentStatsState::Live if stats.finished => State::Seeding,
                 TorrentStatsState::Live => State::Downloading,
+                TorrentStatsState::Paused if held == Some(HoldReason::Schedule) => State::Scheduled,
+                TorrentStatsState::Paused if held == Some(HoldReason::Queue) => State::Queued,
                 TorrentStatsState::Paused if stats.finished => State::Completed,
                 TorrentStatsState::Paused => State::Paused,
                 TorrentStatsState::Error => State::Error,
@@ -531,6 +634,9 @@ impl Worker {
                 category: record.category.clone(),
                 save_path: handle.output_folder().to_string_lossy().into_owned(),
                 added_at: record.added_at,
+                held,
+                queue_pos: outcome.queue_pos,
+                ratio_limit_pct: record.ratio_limit_pct,
                 files,
                 file_done: stats.file_progress.clone(),
                 selected: handle.only_files(),
@@ -556,6 +662,9 @@ impl Worker {
                 category: None,
                 save_path: self.store.data.settings.download_dir.to_string_lossy().into_owned(),
                 added_at: p.added_at,
+                held: None,
+                queue_pos: None,
+                ratio_limit_pct: None,
                 files: Arc::default(),
                 file_done: Vec::new(),
                 selected: None,
@@ -575,6 +684,7 @@ impl Worker {
             down_bps: down_total,
             up_bps: up_total,
             settings: self.store.data.settings.clone(),
+            schedule_off,
             notices: self.notices.clone(),
         };
         let mut current = self.shared.lock().unwrap_or_else(|e| e.into_inner());

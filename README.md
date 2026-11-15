@@ -4,27 +4,31 @@ A torrent client for the Mac, written in Rust. It can be compiled for Windows an
 
 It exists because Transmission hides a torrent's details in a small popup and qBittorrent is awkward to install on Apple Silicon. RustTorrent keeps everything about a torrent in the main window, and aims to stay small and fast: one binary, no web engine.
 
-Status: **0.1, early**. The core works and has been tested on a real download. Many planned features are not built yet; see the list below.
+Status: **0.2, early**. The core works and has been tested on real downloads. Many planned features are not built yet; see the list below.
 
-## What works in 0.1
+## What works in 0.2
 
 - Add torrents by magnet link, `.torrent` file, web address of a `.torrent` file, or bare info-hash.
 - Add by clicking a magnet link in a browser, opening a `.torrent` file from Finder, dropping a file on the window, or pasting into the add box.
 - Pause, resume and remove (optionally deleting the downloaded files).
 - Choose which files of a torrent to download.
 - Global download and upload speed limits.
+- Download queue: set how many torrents download at once; the rest wait in order. Reorder from the right-click menu.
+- Seeding ratio limit: stop seeding at a ratio, set for all torrents or for one.
+- Schedule: allow transfers only between two times of day, on chosen days.
+- Downloads go in order: files one after another by name, each from its start to its end (the first and last piece of a file come first, so a player can read its index). This is how the engine always works, so there is no switch for it.
 - Torrents carry on after the app is restarted.
 - Details in the main window: overview, files, peers and trackers for the selected torrent.
-- Sortable table, search, and filters by status.
+- Sortable table, search, and filters by status. The details show what a waiting torrent is waiting for.
 
 ## Size and speed
 
-Measured on an Apple Silicon Mac with version 0.1:
+Measured on an Apple Silicon Mac (size and memory with 0.2, download test with 0.1):
 
 | | Measured | Target |
 | --- | --- | --- |
 | App on disk | 16 MB (7.7 MB zipped) | under 15 MB |
-| Memory when idle, one torrent seeding | about 70 MB | under 100 MB |
+| Memory with two torrents, one downloading | about 66 MB | under 100 MB |
 | Processor when idle | about 0.1% | |
 | Test download (792 MB Debian image) | finished in under a minute at about 38 MB/s, checksum matched | |
 
@@ -34,11 +38,10 @@ The app is 1 MB over its size target. Most of the size is the drawing library.
 
 In this order, as described in [the design document](docs/designs/rusttorrent.md):
 
-1. Download queue, seeding ratio limits, schedule, reliable in-order download.
-2. Categories and tags, watch folder, RSS auto-download.
-3. Binding to one network interface (for VPN use), blocking all traffic when it is down.
-4. Remote control from a browser or phone.
-5. Homebrew tap, app icon.
+1. Categories and tags, watch folder, RSS auto-download.
+2. Binding to one network interface (for VPN use), blocking all traffic when it is down.
+3. Remote control from a browser or phone.
+4. Homebrew tap, app icon.
 
 There is no plugin support and none is planned.
 
@@ -87,6 +90,8 @@ cargo test --workspace
 ## Known gaps
 
 - No app icon yet.
+- A torrent that has just been added may run for up to a second before the queue or schedule stops it.
+- The ratio limit was checked by automated tests only, not by seeding a real torrent up to a limit.
 - The app is signed only locally ("ad-hoc"), so a copy downloaded from the internet will be blocked by macOS until it is allowed in System Settings. Building it yourself avoids this.
 - Built and tested on Apple Silicon only.
 

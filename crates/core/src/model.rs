@@ -1,6 +1,7 @@
 //! What a front end sees: a plain copy of the current state, with no engine types in it.
 use std::sync::Arc;
 
+use crate::arbiter::HoldReason;
 use crate::store::Settings;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
@@ -13,6 +14,10 @@ pub enum State {
     Seeding,
     /// Paused before the download finished.
     Paused,
+    /// Waiting for a free place among the downloads.
+    Queued,
+    /// Stopped by the schedule until transfers are allowed again.
+    Scheduled,
     /// Finished and not seeding.
     Completed,
     Error,
@@ -26,6 +31,8 @@ impl State {
             State::Downloading => "Downloading",
             State::Seeding => "Seeding",
             State::Paused => "Paused",
+            State::Queued => "Queued",
+            State::Scheduled => "Off by schedule",
             State::Completed => "Completed",
             State::Error => "Error",
         }
@@ -65,6 +72,12 @@ pub struct TorrentView {
     pub category: Option<String>,
     pub save_path: String,
     pub added_at: u64,
+    /// Why the app is holding the torrent back although the user wants it running.
+    pub held: Option<HoldReason>,
+    /// Place in the download queue, from 1. `None` once finished.
+    pub queue_pos: Option<u32>,
+    /// This torrent's own ratio limit in percent, if it has one. 0 means no limit.
+    pub ratio_limit_pct: Option<u32>,
     pub files: Arc<Vec<FileMeta>>,
     /// Bytes done per file, same order as `files`.
     pub file_done: Vec<u64>,
@@ -107,6 +120,8 @@ pub struct Snapshot {
     pub down_bps: u64,
     pub up_bps: u64,
     pub settings: Settings,
+    /// The schedule is stopping all transfers right now.
+    pub schedule_off: bool,
     /// Recent messages, oldest first.
     pub notices: Vec<Notice>,
 }
