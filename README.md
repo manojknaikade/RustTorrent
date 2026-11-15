@@ -4,9 +4,21 @@ A torrent client for the Mac, written in Rust. It can be compiled for Windows an
 
 It exists because Transmission hides a torrent's details in a small popup and qBittorrent is awkward to install on Apple Silicon. RustTorrent keeps everything about a torrent in the main window, and aims to stay small and fast: one binary, no web engine.
 
-Status: **0.5, early**. Every feature planned for the first version is built and has been tested on real downloads. Packaging (Homebrew, an app icon) is still to come.
+Status: **0.6, early**. Every feature planned for the first version is built and has been tested on real downloads, and it installs with Homebrew. What qBittorrent has and RustTorrent lacks is listed in [the comparison](docs/designs/qbittorrent-gap.md), with the plan for closing the gap.
 
-## What works in 0.5
+## Install
+
+On an Apple Silicon Mac, with [Homebrew](https://brew.sh):
+
+```bash
+brew install --cask manojknaikade/tap/rusttorrent
+```
+
+This puts RustTorrent in `/Applications`. Later versions arrive with `brew upgrade`.
+
+To have magnet links in a browser open in RustTorrent, open Settings in the app: the last line says which app macOS uses for magnet links, with a button to change it to RustTorrent.
+
+## What works in 0.6
 
 - Add torrents by magnet link, `.torrent` file, web address of a `.torrent` file, or bare info-hash.
 - Add by clicking a magnet link in a browser, opening a `.torrent` file from Finder, dropping a file on the window, or pasting into the add box.
@@ -16,7 +28,7 @@ Status: **0.5, early**. Every feature planned for the first version is built and
 - Download queue: set how many torrents download at once; the rest wait in order. Reorder from the right-click menu.
 - Seeding ratio limit: stop seeding at a ratio, set for all torrents or for one.
 - Schedule: allow transfers only between two times of day, on chosen days.
-- Downloads go in order: files one after another by name, each from its start to its end (the first and last piece of a file come first, so a player can read its index). This is how the engine always works, so there is no switch for it.
+- Downloads go in order: files one after another by name, each from its start to its end (the first and last piece of a file come first, so a player can read its index). This is how the engine always works, so it cannot be switched off; the right-click menu shows it as a ticked item that is always on.
 - Torrents carry on after the app is restarted.
 - Details in the main window: overview, files, peers and trackers for the selected torrent.
 - Categories and tags: give a torrent one category and any number of tags from the right-click menu, then filter the list by them in the sidebar.
@@ -28,7 +40,7 @@ Status: **0.5, early**. Every feature planned for the first version is built and
 
 ## Size and speed
 
-Measured on an Apple Silicon Mac (size with 0.5, memory with 0.3, download test with 0.1):
+Measured on an Apple Silicon Mac (size with 0.6, memory with 0.3, download test with 0.1):
 
 | | Measured | Target |
 | --- | --- | --- |
@@ -41,9 +53,7 @@ The app is 1 MB over its size target. Most of the size is the drawing library.
 
 ## Planned
 
-In this order, as described in [the design document](docs/designs/rusttorrent.md):
-
-1. Homebrew tap, app icon.
+Everything in [the design document](docs/designs/rusttorrent.md) is built. The next releases are laid out in [the comparison with qBittorrent](docs/designs/qbittorrent-gap.md).
 
 There is no plugin support and none is planned.
 
@@ -57,9 +67,9 @@ On a Mac, build the app bundle:
 ./scripts/bundle-macos.sh
 ```
 
-This writes `dist/RustTorrent.app`. Move it to `/Applications` and open it once so macOS learns that it handles magnet links.
+This writes `dist/RustTorrent.app`. Move it to `/Applications` and open it once so macOS learns that it handles magnet links, then make it the default in the app's Settings.
 
-To make it the default for magnet links, open a magnet link in your browser and pick RustTorrent when asked. If another torrent client is already the default, change it in that client's settings or with a tool such as `duti`.
+The icon is drawn in `assets/icon.svg`. `assets/RustTorrent.icns` is made from it with `rsvg-convert` (one PNG per size into a `RustTorrent.iconset` folder) and `iconutil -c icns`.
 
 On Windows or Linux, or to run without a bundle:
 
@@ -103,12 +113,11 @@ cargo test --workspace
 
 ## Known gaps
 
-- No app icon yet.
 - A torrent that has just been added may run for up to a second before the queue or schedule stops it.
 - A feed downloads every matching item it lists, including ones that were already in the feed when it was added. Use the filter words to narrow it.
 - A category cannot have its own download folder yet.
 - The ratio limit was checked by automated tests only, not by seeding a real torrent up to a limit.
-- The app is signed only locally ("ad-hoc"), so a copy downloaded from the internet will be blocked by macOS until it is allowed in System Settings. Building it yourself avoids this.
+- The app is signed only locally ("ad-hoc"), so a copy downloaded with a browser will be blocked by macOS until it is allowed in System Settings. The Homebrew install removes the download mark so the app opens; building it yourself also avoids the block.
 - Interface binding was tested with the Mac's normal interface and with an interface name that does not exist, not with a real VPN.
 - With an interface chosen, name lookups (DNS) still go through the system's resolver, which may not use that interface. Addresses of trackers and feeds can be looked up outside the VPN; the transfers themselves cannot.
 - If a VPN comes back under a different interface name (for example `utun5` instead of `utun4`), the app stays blocked until the new name is chosen in Settings.
@@ -117,7 +126,8 @@ cargo test --workspace
 - Remote control is not encrypted. On "Allow other devices", the password and everything else travel in the clear, so anybody on the same network who can listen in can read them. Use it only on a network you trust, and do not open the port to the internet.
 - Remote control does not follow the chosen network interface: with a VPN interface chosen it still answers on the normal network.
 - The remote page cannot upload a `.torrent` file, choose files inside a torrent, or set categories. It was tested in one desktop browser at desktop and phone width, not on a real phone.
-- Built and tested on Apple Silicon only.
+- The "Open them in RustTorrent" button in Settings was not tested: on the test Mac, RustTorrent was already the app for magnet links.
+- Built and tested on Apple Silicon only. The Homebrew install is for Apple Silicon only.
 
 ## License
 

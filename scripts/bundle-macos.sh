@@ -12,6 +12,9 @@ cargo build --release -p rusttorrent "$@"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
 cp target/release/rusttorrent "$APP/Contents/MacOS/rusttorrent"
+# The icon is drawn in assets/icon.svg; see the README for how the .icns is made from it.
+mkdir -p "$APP/Contents/Resources"
+cp assets/RustTorrent.icns "$APP/Contents/Resources/RustTorrent.icns"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -22,6 +25,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleDisplayName</key><string>RustTorrent</string>
   <key>CFBundleIdentifier</key><string>io.github.manojknaikade.rusttorrent</string>
   <key>CFBundleExecutable</key><string>rusttorrent</string>
+  <key>CFBundleIconFile</key><string>RustTorrent</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleVersion</key><string>$VERSION</string>
   <key>CFBundleShortVersionString</key><string>$VERSION</string>

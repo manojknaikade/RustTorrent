@@ -73,3 +73,30 @@ pub fn install() {
     }
     std::mem::forget(observer); // lives for the whole run
 }
+
+/// The name macOS knows this app by. It must match the bundle's Info.plist.
+pub const BUNDLE_ID: &str = "io.github.manojknaikade.rusttorrent";
+
+#[link(name = "CoreServices", kind = "framework")]
+unsafe extern "C" {
+    // Both take and give CFString, which is the same object as NSString.
+    fn LSCopyDefaultHandlerForURLScheme(scheme: *const NSString) -> *mut NSString;
+    fn LSSetDefaultHandlerForURLScheme(scheme: *const NSString, bundle_id: *const NSString) -> i32;
+}
+
+/// The bundle identifier of the app that macOS opens magnet links with, if there is one.
+pub fn magnet_handler() -> Option<String> {
+    let scheme = NSString::from_str("magnet");
+    unsafe {
+        let id = LSCopyDefaultHandlerForURLScheme(&*scheme);
+        Retained::from_raw(id).map(|s| s.to_string())
+    }
+}
+
+/// Asks macOS to open magnet links with this app from now on. macOS may ask the user to
+/// agree. Returns false if macOS refused at once.
+pub fn make_magnet_handler() -> bool {
+    let scheme = NSString::from_str("magnet");
+    let id = NSString::from_str(BUNDLE_ID);
+    unsafe { LSSetDefaultHandlerForURLScheme(&*scheme, &*id) == 0 }
+}
