@@ -7,12 +7,14 @@ license.workspace = true
 
 [dependencies]
 librqbit = "=9.1.0"
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "net", "io-util"] }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 dirs = "6"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# Already part of the build through reqwest; used for hashing the remote-control password.
+aws-lc-rs = "1"
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 
 [target.'cfg(unix)'.dependencies]

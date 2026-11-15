@@ -85,6 +85,14 @@ pub enum Command {
     },
     /// The one network interface all traffic must use, or `None` for any.
     SetInterface(Option<String>),
+    /// Remote control from a browser. A password is needed before it can be turned on;
+    /// `None` keeps the one already set.
+    SetRemote {
+        enabled: bool,
+        port: u16,
+        lan: bool,
+        password: Option<String>,
+    },
     /// The folder to watch for `.torrent` files, or none.
     SetWatchDir(Option<PathBuf>),
     /// Replaces the list of feeds.
@@ -172,9 +180,20 @@ struct Worker {
     feed_tx: UnboundedSender<FeedDone>,
     /// Feeds being read right now.
     feeds_busy: HashSet<String>,
+    /// For the remote-control page, which sends commands the same way the window does.
+    tx: UnboundedSender<Command>,
+    remote_task: Option<tokio::task::JoinHandle<()>>,
+    remote_error: Option<String>,
+    remote_try: Option<Instant>,
 }
 
-pub(crate) fn run(data_dir: PathBuf, rx: UnboundedReceiver<Command>, shared: Shared, on_change: OnChange) {
+pub(crate) fn run(
+    data_dir: PathBuf,
+    rx: UnboundedReceiver<Command>,
+    tx: UnboundedSender<Command>,
+    shared: Shared,
+    on_change: OnChange,
+) {
     let fail = |text: String| {
         *shared.lock().unwrap_or_else(|e| e.into_inner()) = Arc::new(Snapshot {
             fatal: Some(text),
@@ -186,7 +205,7 @@ pub(crate) fn run(data_dir: PathBuf, rx: UnboundedReceiver<Command>, shared: Sha
         Ok(rt) => rt,
         Err(e) => return fail(format!("Could not start: {e}")),
     };
-    if let Err(e) = runtime.block_on(main_loop(data_dir, rx, shared.clone(), on_change.clone())) {
+    if let Err(e) = runtime.block_on(main_loop(data_dir, rx, tx, shared.clone(), on_change.clone())) {
         fail(format!("{e:#}"));
     }
     runtime.shutdown_timeout(Duration::from_secs(2));
@@ -199,6 +218,7 @@ fn limit(kib: u32) -> Option<NonZeroU32> {
 async fn main_loop(
     data_dir: PathBuf,
     mut rx: UnboundedReceiver<Command>,
+    tx: UnboundedSender<Command>,
     shared: Shared,
     on_change: OnChange,
 ) -> anyhow::Result<()> {
@@ -233,6 +253,10 @@ async fn main_loop(
         http: None,
         feed_tx,
         feeds_busy: HashSet::new(),
+        tx,
+        remote_task: None,
+        remote_error: None,
+        remote_try: None,
     };
     if let Some(note) = note {
         w.notice(note, true);
@@ -278,6 +302,9 @@ async fn main_loop(
         }
     }
 
+    if let Some(task) = w.remote_task.take() {
+        task.abort();
+    }
     w.stop_session().await;
     w.save();
     Ok(())
@@ -584,6 +611,51 @@ impl Worker {
         self.save();
     }
 
+    /// Stops the remote-control server and, if it is switched on, starts it again with
+    /// the settings as they are now. Everybody signed in has to sign in again.
+    async fn start_remote(&mut self) {
+        if let Some(task) = self.remote_task.take() {
+            task.abort();
+            // Let go of the port before asking for it again.
+            let _ = task.await;
+        }
+        let before = self.remote_error.take();
+        self.remote_try = Some(Instant::now());
+        let remote = self.store.data.settings.remote.clone();
+        if !remote.enabled {
+            return;
+        }
+        let (Some(salt), Some(hash)) = (crate::remote::unhex(&remote.salt), crate::remote::unhex(&remote.hash)) else {
+            self.remote_error = Some("The saved password cannot be read. Set a new one.".into());
+            return;
+        };
+        match crate::remote::listen(remote.lan, remote.port).await {
+            Ok(listener) => {
+                let who = if remote.lan {
+                    "this network"
+                } else {
+                    "this computer only"
+                };
+                self.notice(format!("Remote control is on at port {} ({who}).", remote.port), false);
+                self.remote_task = Some(tokio::spawn(crate::remote::serve(
+                    listener,
+                    salt,
+                    hash,
+                    self.shared.clone(),
+                    self.tx.clone(),
+                )));
+            }
+            Err(e) => {
+                let text = format!("Remote control could not use port {}: {e}", remote.port);
+                // Tried again every few seconds; said once.
+                if before.as_deref() != Some(&text) {
+                    self.notice(text.clone(), true);
+                }
+                self.remote_error = Some(text);
+            }
+        }
+    }
+
     async fn handle(&mut self, command: Command) {
         match command {
             Command::Add(text) => self.add(text, None),
@@ -708,6 +780,39 @@ impl Worker {
             Command::SetInterface(name) => {
                 self.store.data.settings.bind_interface = name.map(|n| n.trim().to_owned()).filter(|n| !n.is_empty());
                 self.save();
+            }
+            Command::SetRemote {
+                enabled,
+                port,
+                lan,
+                password,
+            } => {
+                if let Some(password) = password {
+                    if password.chars().count() < crate::remote::MIN_PASSWORD {
+                        self.notice(
+                            format!(
+                                "The remote-control password needs at least {} characters. It was not changed.",
+                                crate::remote::MIN_PASSWORD
+                            ),
+                            true,
+                        );
+                    } else if let Ok((salt, hash)) =
+                        tokio::task::spawn_blocking(move || crate::remote::hash_password(&password)).await
+                    {
+                        let remote = &mut self.store.data.settings.remote;
+                        (remote.salt, remote.hash) = (salt, hash);
+                    }
+                }
+                let has_password = self.store.data.settings.remote.has_password();
+                if enabled && !has_password {
+                    self.notice("Remote control stays off until it has a password.", true);
+                }
+                let remote = &mut self.store.data.settings.remote;
+                remote.enabled = enabled && has_password;
+                remote.port = if port == 0 { 8787 } else { port };
+                remote.lan = lan;
+                self.save();
+                self.start_remote().await;
             }
             Command::SetWatchDir(dir) => {
                 self.store.data.settings.watch_dir = dir;
@@ -1088,6 +1193,14 @@ impl Worker {
             self.save();
         }
 
+        // A port that was taken may be free by now.
+        if self.store.data.settings.remote.enabled
+            && self.remote_task.is_none()
+            && self.remote_try.is_none_or(|at| at.elapsed() >= Duration::from_secs(15))
+        {
+            self.start_remote().await;
+        }
+
         let snapshot = Snapshot {
             ready: true,
             fatal: None,
@@ -1113,6 +1226,8 @@ impl Worker {
             notices: self.notices.clone(),
             blocked: blocked.then(|| self.blocked.clone().unwrap_or_default()),
             interfaces: self.interfaces.clone(),
+            remote_on: self.remote_task.is_some(),
+            remote_error: self.remote_error.clone(),
         };
         let mut current = self.shared.lock().unwrap_or_else(|e| e.into_inner());
         if **current != snapshot {

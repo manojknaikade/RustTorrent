@@ -34,6 +34,39 @@ pub struct Settings {
     /// Send and receive everything through this network interface alone, and nothing at
     /// all while it is not connected. `None` uses whatever connection the system has.
     pub bind_interface: Option<String>,
+    pub remote: RemoteSettings,
+}
+
+/// Remote control from a browser. Off until the user turns it on and sets a password.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(default)]
+pub struct RemoteSettings {
+    pub enabled: bool,
+    pub port: u16,
+    /// False: only this computer can open the page. True: other devices on the same
+    /// network can too.
+    pub lan: bool,
+    /// The password is never kept, only this salt and the hash made with it, in hex.
+    pub salt: String,
+    pub hash: String,
+}
+
+impl RemoteSettings {
+    pub fn has_password(&self) -> bool {
+        !self.hash.is_empty()
+    }
+}
+
+impl Default for RemoteSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: 8787,
+            lan: false,
+            salt: String::new(),
+            hash: String::new(),
+        }
+    }
 }
 
 impl Default for Settings {
@@ -50,6 +83,7 @@ impl Default for Settings {
             schedule: Schedule::default(),
             watch_dir: None,
             bind_interface: None,
+            remote: RemoteSettings::default(),
         }
     }
 }

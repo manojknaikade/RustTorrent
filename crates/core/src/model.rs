@@ -144,4 +144,8 @@ pub struct Snapshot {
     pub blocked: Option<String>,
     /// The network interfaces that are connected right now.
     pub interfaces: Vec<Interface>,
+    /// The remote-control page is being served right now.
+    pub remote_on: bool,
+    /// Why the remote-control page could not be served.
+    pub remote_error: Option<String>,
 }

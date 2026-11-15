@@ -20,6 +20,16 @@ fn main() {
     let end = plan.last().map_or(10, |(at, _)| at + 10);
 
     let mut core = Core::start(dir.into(), || {});
+    // RUSTTORRENT_REMOTE=<port>:<password> turns remote control on.
+    if let Ok(remote) = std::env::var("RUSTTORRENT_REMOTE") {
+        let (port, password) = remote.split_once(':').expect("<port>:<password>");
+        core.send(Command::SetRemote {
+            enabled: true,
+            port: port.parse().expect("port"),
+            lan: false,
+            password: Some(password.to_owned()),
+        });
+    }
     let start = Instant::now();
     loop {
         let at = start.elapsed().as_secs();

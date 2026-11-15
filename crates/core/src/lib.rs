@@ -1,6 +1,6 @@
 //! RustTorrent's core: every rule of the app, with no window code in it.
 //!
-//! A front end (the desktop window today, a remote-control page later) does two things:
+//! A front end (the desktop window, the remote-control page) does two things:
 //! it sends [`Command`]s and it reads the latest [`Snapshot`]. It never touches the
 //! torrent engine directly.
 pub mod arbiter;
@@ -10,6 +10,7 @@ pub mod format;
 pub mod intake;
 pub mod model;
 pub mod net;
+pub mod remote;
 pub mod rules;
 pub mod store;
 
@@ -23,7 +24,7 @@ pub use feeds::Feed;
 pub use model::{FeedView, FileMeta, Notice, PeerView, Snapshot, State, TorrentView};
 pub use net::Interface;
 pub use rules::{Move, Schedule};
-pub use store::Settings;
+pub use store::{RemoteSettings, Settings};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -57,9 +58,10 @@ impl Core {
         let shared: Shared = Arc::new(Mutex::new(Arc::new(Snapshot::default())));
         let thread = {
             let shared = shared.clone();
+            let tx = tx.clone();
             std::thread::Builder::new()
                 .name("rusttorrent-core".into())
-                .spawn(move || engine::run(data_dir, rx, shared, Arc::new(on_change)))
+                .spawn(move || engine::run(data_dir, rx, tx, shared, Arc::new(on_change)))
                 .expect("starting the core thread")
         };
         Self {

@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>RustTorrent</title>
+<link rel="stylesheet" href="app.css">
+<script src="app.js" defer></script>
+</head>
+<body>
+<main id="login" hidden>
+  <form id="login-form" class="card narrow">
+    <h1>RustTorrent</h1>
+    <label for="password">Password</label>
+    <input id="password" type="password" autocomplete="current-password" required>
+    <button class="primary">Sign in</button>
+    <p id="login-error" class="error" role="alert"></p>
+  </form>
+</main>
+
+<main id="app" hidden>
+  <header>
+    <h1>RustTorrent</h1>
+    <span id="speeds" class="muted"></span>
+    <button id="sign-out" class="quiet">Sign out</button>
+  </header>
+
+  <p id="banner" class="banner" role="status" hidden></p>
+
+  <form id="add-form" class="row">
+    <input id="add-text" type="text" placeholder="Magnet link or web address of a .torrent file"
+           aria-label="Magnet link or web address of a .torrent file" autocomplete="off" required>
+    <button class="primary">Add</button>
+  </form>
+  <p id="message" class="muted" role="status"></p>
+
+  <ul id="list"></ul>
+  <p id="empty" class="muted center" hidden>No torrents yet.</p>
+
+  <details class="card">
+    <summary>Speed limits</summary>
+    <form id="limits-form" class="limits">
+      <label>Download, KiB/s <input id="limit-down" type="number" min="0" max="4000000" inputmode="numeric"></label>
+      <label>Upload, KiB/s <input id="limit-up" type="number" min="0" max="4000000" inputmode="numeric"></label>
+      <button>Set</button>
+      <span class="muted">0 means no limit.</span>
+    </form>
+  </details>
+
+  <footer class="muted center" id="footer"></footer>
+</main>
+
+<dialog id="remove-dialog">
+  <form method="dialog">
+    <h2>Remove this torrent?</h2>
+    <p id="remove-name"></p>
+    <label class="check"><input id="remove-files" type="checkbox"> Also delete the downloaded files</label>
+    <div class="row end">
+      <button value="cancel">Cancel</button>
+      <button value="remove" class="danger">Remove</button>
+    </div>
+  </form>
+</dialog>
+</body>
+</html>

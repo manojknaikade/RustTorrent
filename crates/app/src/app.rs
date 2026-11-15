@@ -103,6 +103,11 @@ struct SettingsDialog {
     watch_dir: Option<std::path::PathBuf>,
     /// The one network interface to use, or `None` for any.
     interface: Option<String>,
+    remote_on: bool,
+    remote_port: u16,
+    remote_lan: bool,
+    /// A new password for remote control. Empty keeps the one already set.
+    remote_password: String,
 }
 
 /// Asks for the name of a new category or tag for some torrents.
@@ -158,6 +163,10 @@ impl SettingsDialog {
             watch_on: s.watch_dir.is_some(),
             watch_dir: s.watch_dir.clone(),
             interface: s.bind_interface.clone(),
+            remote_on: s.remote.enabled,
+            remote_port: s.remote.port,
+            remote_lan: s.remote.lan,
+            remote_password: String::new(),
         }
     }
 }
@@ -1222,6 +1231,65 @@ impl App {
                     .weak(),
                 );
                 ui.add_space(8.0);
+                ui.checkbox(&mut dialog.remote_on, "Remote control from a browser");
+                let has_password = snap.settings.remote.has_password();
+                ui.add_enabled_ui(dialog.remote_on, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Port");
+                        ui.add(egui::DragValue::new(&mut dialog.remote_port).range(1024..=65535));
+                        ui.checkbox(&mut dialog.remote_lan, "Allow other devices on my network");
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label(if has_password { "New password" } else { "Password" });
+                        ui.add(
+                            egui::TextEdit::singleline(&mut dialog.remote_password)
+                                .password(true)
+                                .desired_width(200.0)
+                                .hint_text(if has_password {
+                                    "unchanged"
+                                } else {
+                                    "at least 8 characters"
+                                }),
+                        );
+                    });
+                });
+                let typed = dialog.remote_password.chars().count();
+                let problem = if typed > 0 && typed < rusttorrent_core::remote::MIN_PASSWORD {
+                    Some("The password needs at least 8 characters.")
+                } else if dialog.remote_on && !has_password && typed == 0 {
+                    Some("Remote control needs a password.")
+                } else {
+                    None
+                };
+                let red = ui.visuals().error_fg_color;
+                if let Some(problem) = problem {
+                    ui.label(RichText::new(problem).small().color(red));
+                } else if let Some(error) = &snap.remote_error {
+                    ui.label(RichText::new(error).small().color(red));
+                } else if snap.remote_on {
+                    let port = snap.settings.remote.port;
+                    let mut text = format!("On now. On this computer: http://localhost:{port}");
+                    if snap.settings.remote.lan {
+                        let other = snap
+                            .interfaces
+                            .iter()
+                            .flat_map(|i| &i.addrs)
+                            .find(|a| a.parse::<std::net::Ipv4Addr>().is_ok_and(|ip| !ip.is_loopback()));
+                        if let Some(addr) = other {
+                            text.push_str(&format!("   From a phone: http://{addr}:{port}"));
+                        }
+                    }
+                    ui.label(RichText::new(text).small());
+                }
+                ui.label(
+                    RichText::new(
+                        "The page can add, pause, resume and remove torrents and set speed limits. \
+                         It is not encrypted: allow other devices only on a network you trust.",
+                    )
+                    .small()
+                    .weak(),
+                );
+                ui.add_space(8.0);
                 ui.label(
                     RichText::new(format!("RustTorrent {}", rusttorrent_core::VERSION))
                         .small()
@@ -1229,7 +1297,8 @@ impl App {
                 );
                 ui.add_space(4.0);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button(RichText::new("Save").strong()).clicked() {
+                    let button = egui::Button::new(RichText::new("Save").strong());
+                    if ui.add_enabled(problem.is_none(), button).clicked() {
                         save = true;
                     }
                     if ui.button("Cancel").clicked() {
@@ -1257,6 +1326,19 @@ impl App {
                 }
                 if dialog.interface != snap.settings.bind_interface {
                     core.send(Command::SetInterface(dialog.interface.clone()));
+                }
+                let remote = &snap.settings.remote;
+                let password = Some(std::mem::take(&mut dialog.remote_password)).filter(|p| !p.is_empty());
+                if password.is_some()
+                    || (dialog.remote_on, dialog.remote_port, dialog.remote_lan)
+                        != (remote.enabled, remote.port, remote.lan)
+                {
+                    core.send(Command::SetRemote {
+                        enabled: dialog.remote_on,
+                        port: dialog.remote_port,
+                        lan: dialog.remote_lan,
+                        password,
+                    });
                 }
                 close = true;
             }
@@ -1537,9 +1619,14 @@ impl eframe::App for App {
             {
                 use std::sync::atomic::{AtomicBool, Ordering};
                 static OPENED: AtomicBool = AtomicBool::new(false);
-                let wanted = std::env::var("RUSTTORRENT_SHOT_TAB").is_ok_and(|t| t == "feeds");
-                if wanted && self.snap.ready && !OPENED.swap(true, Ordering::Relaxed) {
-                    self.feeds = Some(FeedsDialog::of(&self.snap));
+                let wanted = std::env::var("RUSTTORRENT_SHOT_TAB").unwrap_or_default();
+                let known = wanted == "feeds" || wanted == "settings";
+                if known && self.snap.ready && !OPENED.swap(true, Ordering::Relaxed) {
+                    if wanted == "feeds" {
+                        self.feeds = Some(FeedsDialog::of(&self.snap));
+                    } else {
+                        self.settings = Some(SettingsDialog::of(&self.snap.settings));
+                    }
                 }
             }
             // Testing only: open the first torrent's details on a given tab.
@@ -1549,9 +1636,6 @@ impl eframe::App for App {
                 let key = self.snap.torrents[first].key.clone();
                 self.selected = vec![key.clone()];
                 self.focus = Some(key);
-                if tab == "settings" {
-                    self.settings = Some(SettingsDialog::of(&self.snap.settings));
-                }
                 self.tab = match tab.as_str() {
                     "files" => Tab::Files,
                     "peers" => Tab::Peers,
