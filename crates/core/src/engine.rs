@@ -21,8 +21,9 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use chrono::{Datelike, Timelike};
 
 use crate::arbiter::{decide, Decision, HoldReason, Intent};
+use crate::feeds::{self, Feed};
 use crate::intake::{self, Source};
-use crate::model::{FileMeta, Notice, PeerView, Snapshot, State, TorrentView};
+use crate::model::{FeedView, FileMeta, Notice, PeerView, Snapshot, State, TorrentView};
 use crate::rules::{self, Clock, Move, Schedule};
 use crate::store::{Record, Store};
 use crate::{now_secs, Shared};
@@ -65,6 +66,23 @@ pub enum Command {
         keys: Vec<String>,
         how: Move,
     },
+    /// Put these torrents in a category, or in none.
+    SetCategory {
+        keys: Vec<String>,
+        category: Option<String>,
+    },
+    /// Give these torrents a tag, or take it away.
+    SetTag {
+        keys: Vec<String>,
+        tag: String,
+        on: bool,
+    },
+    /// The folder to watch for `.torrent` files, or none.
+    SetWatchDir(Option<PathBuf>),
+    /// Replaces the list of feeds.
+    SetFeeds(Vec<Feed>),
+    /// Read every feed now instead of waiting for its turn.
+    CheckFeeds,
     /// The torrent whose peers the front end wants to see.
     Watch(Option<String>),
     Shutdown,
@@ -75,13 +93,26 @@ type OnChange = Arc<dyn Fn() + Send + Sync>;
 
 const SAVE_EVERY: Duration = Duration::from_secs(30);
 const KEEP_NOTICES: usize = 50;
+const SCAN_EVERY: Duration = Duration::from_secs(5);
+/// How often each feed is read, in seconds.
+const FEED_EVERY: u64 = 15 * 60;
+const FEED_MAX_BYTES: usize = 8 * 1024 * 1024;
+const KEEP_SEEN: usize = 2000;
 
 struct Pending {
     id: u64,
     text: String,
     label: String,
     added_at: u64,
+    /// The category the torrent gets once it is added.
+    category: Option<String>,
     task: tokio::task::JoinHandle<()>,
+}
+
+struct FeedDone {
+    url: String,
+    /// The feed's text.
+    result: Result<String, String>,
 }
 
 struct AddDone {
@@ -113,6 +144,13 @@ struct Worker {
     watched: Option<String>,
     dirty: bool,
     last_save: Instant,
+    last_scan: Option<Instant>,
+    /// Files in the watch folder that could not be handled, so they are reported once.
+    watch_failed: HashSet<PathBuf>,
+    http: reqwest::Client,
+    feed_tx: UnboundedSender<FeedDone>,
+    /// Feeds being read right now.
+    feeds_busy: HashSet<String>,
 }
 
 pub(crate) fn run(data_dir: PathBuf, rx: UnboundedReceiver<Command>, shared: Shared, on_change: OnChange) {
@@ -168,6 +206,12 @@ async fn main_loop(
         .map_err(|e| anyhow::anyhow!("The torrent engine could not start: {e:#}"))?;
 
     let (add_tx, mut add_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (feed_tx, mut feed_rx) = tokio::sync::mpsc::unbounded_channel();
+    let http = reqwest::Client::builder()
+        .user_agent(format!("RustTorrent/{}", crate::VERSION))
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| anyhow::anyhow!("Could not set up the feed reader: {e}"))?;
     let mut w = Worker {
         session,
         store,
@@ -183,13 +227,18 @@ async fn main_loop(
         watched: None,
         dirty: false,
         last_save: Instant::now(),
+        last_scan: None,
+        watch_failed: HashSet::new(),
+        http,
+        feed_tx,
+        feeds_busy: HashSet::new(),
     };
     if let Some(note) = note {
         w.notice(note, true);
     }
     // Links whose details had not arrived when the app last quit.
     for text in std::mem::take(&mut w.store.data.pending) {
-        w.add(text);
+        w.add(text, None);
     }
     w.tick().await;
 
@@ -218,6 +267,10 @@ async fn main_loop(
             },
             Some(done) = add_rx.recv() => {
                 w.added(done);
+                w.tick().await;
+            }
+            Some(done) = feed_rx.recv() => {
+                w.feed_done(done);
                 w.tick().await;
             }
             _ = timer.tick() => w.tick().await,
@@ -278,7 +331,7 @@ impl Worker {
         self.handles().into_iter().find(|h| h.info_hash().as_string() == key)
     }
 
-    fn add(&mut self, text: String) {
+    fn add(&mut self, text: String, category: Option<String>) {
         let source = match intake::parse(&text) {
             Ok(s) => s,
             Err(e) => return self.notice(e, true),
@@ -309,6 +362,7 @@ impl Worker {
             text: text.clone(),
             label,
             added_at: now_secs(),
+            category,
             task,
         });
         self.store.data.pending.push(text);
@@ -316,7 +370,10 @@ impl Worker {
     }
 
     fn added(&mut self, done: AddDone) {
-        self.pending.retain(|p| p.id != done.id);
+        let category = match self.pending.iter().position(|p| p.id == done.id) {
+            Some(i) => self.pending.remove(i).category,
+            None => None,
+        };
         self.store.data.pending.retain(|t| *t != done.text);
         match done.result {
             Ok((key, name, false)) => {
@@ -327,6 +384,7 @@ impl Worker {
                         intent: Intent::Run,
                         added_at: now_secs(),
                         queue_pos,
+                        category,
                         ..Default::default()
                     },
                 );
@@ -376,7 +434,7 @@ impl Worker {
 
     async fn handle(&mut self, command: Command) {
         match command {
-            Command::Add(text) => self.add(text),
+            Command::Add(text) => self.add(text, None),
             Command::Pause(keys) => self.set_intent(&keys, Intent::Pause),
             Command::Resume(keys) => self.set_intent(&keys, Intent::Run),
             Command::Remove { keys, delete_files } => {
@@ -463,9 +521,171 @@ impl Worker {
                 }
                 self.save();
             }
+            Command::SetCategory { keys, category } => {
+                let category = category.map(|c| c.trim().to_owned()).filter(|c| !c.is_empty());
+                for key in keys {
+                    if let Some(record) = self.store.data.torrents.get_mut(&key) {
+                        record.category = category.clone();
+                    }
+                }
+                self.save();
+            }
+            Command::SetTag { keys, tag, on } => {
+                let tag = tag.trim().to_owned();
+                if tag.is_empty() {
+                    return;
+                }
+                for key in keys {
+                    if let Some(record) = self.store.data.torrents.get_mut(&key) {
+                        record.tags.retain(|t| *t != tag);
+                        if on {
+                            record.tags.push(tag.clone());
+                            record.tags.sort();
+                        }
+                    }
+                }
+                self.save();
+            }
+            Command::SetWatchDir(dir) => {
+                self.store.data.settings.watch_dir = dir;
+                self.watch_failed.clear();
+                self.last_scan = None;
+                self.save();
+            }
+            Command::SetFeeds(feeds) => {
+                let mut kept: Vec<Feed> = Vec::new();
+                for mut feed in feeds {
+                    feed.url = feed.url.trim().to_owned();
+                    feed.name = feed.name.trim().to_owned();
+                    feed.category = feed.category.map(|c| c.trim().to_owned()).filter(|c| !c.is_empty());
+                    if !feed.url.is_empty() && !kept.iter().any(|f| f.url == feed.url) {
+                        kept.push(feed);
+                    }
+                }
+                let data = &mut self.store.data;
+                data.feed_state.retain(|url, _| kept.iter().any(|f| f.url == *url));
+                // A changed filter should be tried at once, not in a quarter of an hour.
+                for feed in &kept {
+                    if !data.feeds.contains(feed) {
+                        if let Some(state) = data.feed_state.get_mut(&feed.url) {
+                            state.checked_at = 0;
+                        }
+                    }
+                }
+                data.feeds = kept;
+                self.save();
+            }
+            Command::CheckFeeds => {
+                for state in self.store.data.feed_state.values_mut() {
+                    state.checked_at = 0;
+                }
+            }
             Command::Watch(key) => self.watched = key,
             Command::Shutdown => {}
         }
+    }
+
+    /// Adds the `.torrent` files found in the watch folder. Each one is renamed first, so
+    /// it is picked up once only and the folder shows what has been taken.
+    fn scan_watch_dir(&mut self) {
+        let Some(dir) = self.store.data.settings.watch_dir.clone() else {
+            return;
+        };
+        let Ok(entries) = std::fs::read_dir(&dir) else { return };
+        let mut found: Vec<PathBuf> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.extension().is_some_and(|x| x.eq_ignore_ascii_case("torrent"))
+                    && !self.watch_failed.contains(p)
+                    // Leave a file alone while it may still be being written.
+                    && std::fs::metadata(p).is_ok_and(|m| {
+                        m.is_file() && m.modified().ok().and_then(|t| t.elapsed().ok()).is_none_or(|age| age >= Duration::from_secs(2))
+                    })
+            })
+            .collect();
+        found.sort();
+        for path in found {
+            let mut taken = path.clone().into_os_string();
+            taken.push(".added");
+            let taken = PathBuf::from(taken);
+            match std::fs::rename(&path, &taken) {
+                Ok(()) => self.add(taken.to_string_lossy().into_owned(), None),
+                Err(e) => {
+                    self.notice(
+                        format!("Could not take {} from the watch folder: {e}", path.display()),
+                        true,
+                    );
+                    self.watch_failed.insert(path);
+                }
+            }
+        }
+    }
+
+    /// Starts reading every feed whose turn has come.
+    fn poll_feeds(&mut self) {
+        let now = now_secs();
+        for feed in &self.store.data.feeds {
+            let checked_at = self.store.data.feed_state.get(&feed.url).map_or(0, |s| s.checked_at);
+            if !feed.enabled || now < checked_at.saturating_add(FEED_EVERY) || self.feeds_busy.contains(&feed.url) {
+                continue;
+            }
+            self.feeds_busy.insert(feed.url.clone());
+            let (http, tx, url) = (self.http.clone(), self.feed_tx.clone(), feed.url.clone());
+            tokio::spawn(async move {
+                let result = fetch_feed(&http, &url).await;
+                let _ = tx.send(FeedDone { url, result });
+            });
+        }
+    }
+
+    fn feed_done(&mut self, done: FeedDone) {
+        self.feeds_busy.remove(&done.url);
+        let Some(feed) = self.store.data.feeds.iter().find(|f| f.url == done.url).cloned() else {
+            return;
+        };
+        let shown = if feed.name.is_empty() {
+            feed.url.clone()
+        } else {
+            feed.name.clone()
+        };
+        let mut state = self.store.data.feed_state.remove(&feed.url).unwrap_or_default();
+        state.checked_at = now_secs();
+        let result = done.result.and_then(|text| {
+            let items = feeds::parse(&text);
+            if items.is_empty() {
+                Err("no items with a link were found in it".to_owned())
+            } else {
+                Ok(items)
+            }
+        });
+        match result {
+            Ok(items) => {
+                state.error = None;
+                // Oldest first, so torrents join the queue in the order they were published.
+                for item in items.into_iter().rev() {
+                    if !feed.wants(&item.title) || state.seen.contains(&item.id) {
+                        continue;
+                    }
+                    state.seen.push(item.id);
+                    self.notice(format!("Feed {shown}: adding {}", item.title), false);
+                    self.add(item.link, feed.category.clone());
+                }
+                if state.seen.len() > KEEP_SEEN {
+                    let extra = state.seen.len() - KEEP_SEEN;
+                    state.seen.drain(..extra);
+                }
+            }
+            Err(e) => {
+                // Say it once, not every quarter of an hour.
+                if state.error.as_deref() != Some(e.as_str()) {
+                    self.notice(format!("Could not read feed {shown}: {e}"), true);
+                }
+                state.error = Some(e);
+            }
+        }
+        self.store.data.feed_state.insert(feed.url, state);
+        self.save();
     }
 
     /// Adds what each running torrent uploaded since the last look to its lifetime total.
@@ -529,6 +749,12 @@ impl Worker {
     }
 
     async fn tick(&mut self) {
+        if self.last_scan.is_none_or(|t| t.elapsed() >= SCAN_EVERY) {
+            self.last_scan = Some(Instant::now());
+            self.scan_watch_dir();
+        }
+        self.poll_feeds();
+
         let mut torrents = Vec::new();
         let (mut down_total, mut up_total) = (0, 0);
 
@@ -632,6 +858,7 @@ impl Worker {
                 peers_live,
                 peers_seen,
                 category: record.category.clone(),
+                tags: record.tags.clone(),
                 save_path: handle.output_folder().to_string_lossy().into_owned(),
                 added_at: record.added_at,
                 held,
@@ -659,7 +886,8 @@ impl Worker {
                 up_bps: 0,
                 peers_live: 0,
                 peers_seen: 0,
-                category: None,
+                category: p.category.clone(),
+                tags: Vec::new(),
                 save_path: self.store.data.settings.download_dir.to_string_lossy().into_owned(),
                 added_at: p.added_at,
                 held: None,
@@ -685,6 +913,20 @@ impl Worker {
             up_bps: up_total,
             settings: self.store.data.settings.clone(),
             schedule_off,
+            feeds: self
+                .store
+                .data
+                .feeds
+                .iter()
+                .map(|feed| {
+                    let state = self.store.data.feed_state.get(&feed.url);
+                    FeedView {
+                        feed: feed.clone(),
+                        checked_at: state.map_or(0, |s| s.checked_at),
+                        error: state.and_then(|s| s.error.clone()),
+                    }
+                })
+                .collect(),
             notices: self.notices.clone(),
         };
         let mut current = self.shared.lock().unwrap_or_else(|e| e.into_inner());
@@ -717,6 +959,19 @@ fn peers_of(handle: &Handle) -> Vec<PeerView> {
         .collect();
     peers.sort_by(|a, b| b.downloaded.cmp(&a.downloaded).then_with(|| a.addr.cmp(&b.addr)));
     peers
+}
+
+async fn fetch_feed(http: &reqwest::Client, url: &str) -> Result<String, String> {
+    let plain = |e: reqwest::Error| format!("{:#}", anyhow::Error::from(e.without_url()));
+    let response = http.get(url).send().await.map_err(plain)?;
+    if !response.status().is_success() {
+        return Err(format!("the server answered {}", response.status()));
+    }
+    let bytes = response.bytes().await.map_err(plain)?;
+    if bytes.len() > FEED_MAX_BYTES {
+        return Err("it is too large to be a feed".into());
+    }
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 async fn add_to_engine(

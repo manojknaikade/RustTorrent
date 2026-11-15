@@ -2,6 +2,7 @@
 use std::sync::Arc;
 
 use crate::arbiter::HoldReason;
+use crate::feeds::Feed;
 use crate::store::Settings;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
@@ -70,6 +71,7 @@ pub struct TorrentView {
     pub peers_live: u32,
     pub peers_seen: u32,
     pub category: Option<String>,
+    pub tags: Vec<String>,
     pub save_path: String,
     pub added_at: u64,
     /// Why the app is holding the torrent back although the user wants it running.
@@ -110,6 +112,14 @@ pub struct Notice {
     pub error: bool,
 }
 
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct FeedView {
+    pub feed: Feed,
+    /// When the feed was last read, in seconds since 1970. 0 if never.
+    pub checked_at: u64,
+    pub error: Option<String>,
+}
+
 #[derive(Clone, PartialEq, Debug, Default)]
 pub struct Snapshot {
     /// False until the engine has started.
@@ -122,6 +132,7 @@ pub struct Snapshot {
     pub settings: Settings,
     /// The schedule is stopping all transfers right now.
     pub schedule_off: bool,
+    pub feeds: Vec<FeedView>,
     /// Recent messages, oldest first.
     pub notices: Vec<Notice>,
 }

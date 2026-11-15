@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use eframe::egui::{self, Color32, RichText, Sense};
 use egui_extras::{Column, TableBuilder};
-use rusttorrent_core::{format, Command, Core, HoldReason, Move, Schedule, Snapshot, State, TorrentView};
+use rusttorrent_core::{format, Command, Core, Feed, HoldReason, Move, Schedule, Snapshot, State, TorrentView};
 
 fn color(state: State) -> Color32 {
     match state {
@@ -99,6 +99,45 @@ struct SettingsDialog {
     /// The ratio itself (1.5), not the percent the core stores.
     ratio: f32,
     schedule: Schedule,
+    watch_on: bool,
+    watch_dir: Option<std::path::PathBuf>,
+}
+
+/// Asks for the name of a new category or tag for some torrents.
+struct NameDialog {
+    keys: Vec<String>,
+    tag: bool,
+    text: String,
+}
+
+struct FeedsDialog {
+    feeds: Vec<Feed>,
+    /// The category of each feed as text, same order as `feeds`.
+    categories: Vec<String>,
+}
+
+impl FeedsDialog {
+    fn of(snap: &Snapshot) -> Self {
+        let feeds: Vec<Feed> = snap.feeds.iter().map(|f| f.feed.clone()).collect();
+        let categories = feeds.iter().map(|f| f.category.clone().unwrap_or_default()).collect();
+        Self { feeds, categories }
+    }
+}
+
+/// Every category and every tag in use, each sorted by name.
+fn names_in_use(snap: &Snapshot) -> (Vec<String>, Vec<String>) {
+    let mut categories: Vec<String> = snap
+        .torrents
+        .iter()
+        .filter_map(|t| t.category.clone())
+        .chain(snap.feeds.iter().filter_map(|f| f.feed.category.clone()))
+        .collect();
+    let mut tags: Vec<String> = snap.torrents.iter().flat_map(|t| t.tags.iter().cloned()).collect();
+    for list in [&mut categories, &mut tags] {
+        list.sort_by_key(|n| n.to_lowercase());
+        list.dedup();
+    }
+    (categories, tags)
 }
 
 impl SettingsDialog {
@@ -114,6 +153,8 @@ impl SettingsDialog {
                 1.0
             },
             schedule: s.schedule,
+            watch_on: s.watch_dir.is_some(),
+            watch_dir: s.watch_dir.clone(),
         }
     }
 }
@@ -160,6 +201,9 @@ pub struct App {
     /// The torrent the details panel shows.
     focus: Option<String>,
     filter: Filter,
+    /// Show only this category, and only this tag.
+    category: Option<String>,
+    tag: Option<String>,
     search: String,
     /// Column and direction. Column 0 means newest first.
     sort: (usize, bool),
@@ -170,6 +214,8 @@ pub struct App {
     add: Option<String>,
     remove: Option<RemoveDialog>,
     settings: Option<SettingsDialog>,
+    name: Option<NameDialog>,
+    feeds: Option<FeedsDialog>,
 }
 
 fn ratio_of(t: &TorrentView) -> f64 {
@@ -226,6 +272,8 @@ impl App {
             selected: Vec::new(),
             focus: None,
             filter: Filter::All,
+            category: None,
+            tag: None,
             search: String::new(),
             sort: (0, false),
             tab: Tab::Overview,
@@ -234,16 +282,36 @@ impl App {
             add: None,
             remove: None,
             settings: None,
+            name: None,
+            feeds: None,
         }
     }
 
     fn rebuild(&mut self) {
         let all = &self.snap.torrents;
         let q = self.search.to_lowercase();
+        // A category or tag that no torrent has any more cannot be filtered on.
+        if self
+            .category
+            .as_ref()
+            .is_some_and(|c| !all.iter().any(|t| t.category.as_ref() == Some(c)))
+        {
+            self.category = None;
+        }
+        if self
+            .tag
+            .as_ref()
+            .is_some_and(|g| !all.iter().any(|t| t.tags.contains(g)))
+        {
+            self.tag = None;
+        }
         self.view = (0..all.len())
             .filter(|&i| {
                 let t = &all[i];
-                self.filter.matches(t.state) && (q.is_empty() || t.name.to_lowercase().contains(&q))
+                self.filter.matches(t.state)
+                    && self.category.as_ref().is_none_or(|c| t.category.as_ref() == Some(c))
+                    && self.tag.as_ref().is_none_or(|g| t.tags.contains(g))
+                    && (q.is_empty() || t.name.to_lowercase().contains(&q))
             })
             .collect();
         let (col, asc) = self.sort;
@@ -317,6 +385,15 @@ impl App {
                     let s = &self.snap.settings;
                     self.settings = Some(SettingsDialog::of(s));
                 }
+                let failing = self.snap.feeds.iter().any(|f| f.feed.enabled && f.error.is_some());
+                let feeds = if failing {
+                    RichText::new("Feeds !").color(color(State::Error))
+                } else {
+                    RichText::new("Feeds")
+                };
+                if ui.button(feeds).clicked() {
+                    self.feeds = Some(FeedsDialog::of(&self.snap));
+                }
                 ui.separator();
                 ui.label(format!("↑ {}", format::speed(self.snap.up_bps)));
                 ui.label(RichText::new(format!("↓ {}", format::speed(self.snap.down_bps))).strong());
@@ -378,6 +455,42 @@ impl App {
                 self.dirty = true;
             }
         }
+        let snap = self.snap.clone();
+        let (categories, tags) = names_in_use(&snap);
+        egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+            for (title, names, tag) in [("CATEGORIES", categories, false), ("TAGS", tags, true)] {
+                let names: Vec<(String, usize)> = names
+                    .into_iter()
+                    .map(|n| {
+                        let has = |t: &&TorrentView| {
+                            if tag {
+                                t.tags.contains(&n)
+                            } else {
+                                t.category.as_ref() == Some(&n)
+                            }
+                        };
+                        let count = snap.torrents.iter().filter(has).count();
+                        (n, count)
+                    })
+                    .filter(|(_, count)| *count > 0)
+                    .collect();
+                if names.is_empty() {
+                    continue;
+                }
+                ui.add_space(10.0);
+                ui.label(RichText::new(title).small().weak());
+                let chosen = if tag { &mut self.tag } else { &mut self.category };
+                for (name, count) in names {
+                    let on = chosen.as_ref() == Some(&name);
+                    let label = egui::Button::selectable(on, format!("{name}  {count}")).truncate();
+                    // A second click shows everything again.
+                    if ui.add(label).clicked() {
+                        *chosen = if on { None } else { Some(name) };
+                        self.dirty = true;
+                    }
+                }
+            }
+        });
     }
 
     fn details(&mut self, ui: &mut egui::Ui) {
@@ -496,6 +609,17 @@ impl App {
             });
         ui.add_space(4.0);
         ui.horizontal(|ui| {
+            ui.label(RichText::new("Category").weak());
+            ui.label(t.category.as_deref().unwrap_or("–"));
+            ui.add_space(20.0);
+            ui.label(RichText::new("Tags").weak());
+            if t.tags.is_empty() {
+                ui.label("–");
+            } else {
+                ui.add(egui::Label::new(t.tags.join(", ")).truncate());
+            }
+        });
+        ui.horizontal(|ui| {
             ui.label(RichText::new("Saved to").weak());
             ui.add(egui::Label::new(&t.save_path).truncate());
         });
@@ -602,6 +726,9 @@ impl App {
         let mut sort = self.sort;
         let mut clicked: Option<usize> = None;
         let mut action: Option<(Command, bool)> = None;
+        // Set when the menu asks for a new category (false) or tag (true).
+        let mut ask_name: Option<(Vec<String>, bool)> = None;
+        let (categories, tags) = names_in_use(&snap);
         TableBuilder::new(ui)
             .striped(true)
             .sense(Sense::click())
@@ -733,6 +860,58 @@ impl App {
                                 }
                             }
                         });
+                        ui.menu_button("Category", |ui| {
+                            if ui.radio(t.category.is_none(), "None").clicked() {
+                                action = Some((
+                                    Command::SetCategory {
+                                        keys: key.clone(),
+                                        category: None,
+                                    },
+                                    false,
+                                ));
+                                ui.close();
+                            }
+                            for name in &categories {
+                                if ui.radio(t.category.as_ref() == Some(name), name).clicked() {
+                                    action = Some((
+                                        Command::SetCategory {
+                                            keys: key.clone(),
+                                            category: Some(name.clone()),
+                                        },
+                                        false,
+                                    ));
+                                    ui.close();
+                                }
+                            }
+                            ui.separator();
+                            if ui.button("New…").clicked() {
+                                ask_name = Some((key.clone(), false));
+                                ui.close();
+                            }
+                        });
+                        ui.menu_button("Tags", |ui| {
+                            for name in &tags {
+                                let mut on = t.tags.contains(name);
+                                if ui.checkbox(&mut on, name).clicked() {
+                                    action = Some((
+                                        Command::SetTag {
+                                            keys: key.clone(),
+                                            tag: name.clone(),
+                                            on,
+                                        },
+                                        false,
+                                    ));
+                                    ui.close();
+                                }
+                            }
+                            if !tags.is_empty() {
+                                ui.separator();
+                            }
+                            if ui.button("New…").clicked() {
+                                ask_name = Some((key.clone(), true));
+                                ui.close();
+                            }
+                        });
                         ui.separator();
                         if ui.button("Remove…").clicked() {
                             action = Some((
@@ -777,6 +956,13 @@ impl App {
             Some((Command::Remove { keys, .. }, true)) => self.ask_remove(keys),
             Some((command, _)) => self.core.send(command),
             None => {}
+        }
+        if let Some((keys, tag)) = ask_name {
+            self.name = Some(NameDialog {
+                keys,
+                tag,
+                text: String::new(),
+            });
         }
         if sort != self.sort {
             self.sort = sort;
@@ -972,6 +1158,27 @@ impl App {
                     });
                 });
                 ui.add_space(8.0);
+                ui.checkbox(&mut dialog.watch_on, "Add .torrent files put in a folder");
+                ui.add_enabled_ui(dialog.watch_on, |ui| {
+                    ui.horizontal(|ui| {
+                        if ui.button("Choose…").clicked() {
+                            if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                                dialog.watch_dir = Some(dir);
+                            }
+                        }
+                        let text = match &dialog.watch_dir {
+                            Some(dir) => RichText::new(dir.display().to_string()),
+                            None => RichText::new("No folder chosen").weak(),
+                        };
+                        ui.add(egui::Label::new(text).truncate());
+                    });
+                    ui.label(
+                        RichText::new("A file that has been added is renamed to end in “.added”.")
+                            .small()
+                            .weak(),
+                    );
+                });
+                ui.add_space(8.0);
                 ui.label(
                     RichText::new(format!("RustTorrent {}", rusttorrent_core::VERSION))
                         .small()
@@ -1001,10 +1208,184 @@ impl App {
                     },
                     schedule: dialog.schedule,
                 });
+                let watch = dialog.watch_dir.clone().filter(|_| dialog.watch_on);
+                if watch != snap.settings.watch_dir {
+                    core.send(Command::SetWatchDir(watch));
+                }
                 close = true;
             }
             if close || response.should_close() {
                 self.settings = None;
+            }
+        }
+
+        if let Some(dialog) = &mut self.name {
+            let (mut close, mut save) = (false, false);
+            let what = if dialog.tag { "tag" } else { "category" };
+            let response = egui::Modal::new(egui::Id::unique("name")).show(ctx, |ui| {
+                ui.set_width(320.0);
+                ui.heading(format!("New {what}"));
+                ui.add_space(4.0);
+                let n = dialog.keys.len();
+                ui.label(if n == 1 {
+                    format!("Name of the {what} for this torrent")
+                } else {
+                    format!("Name of the {what} for these {n} torrents")
+                });
+                let r = ui.add(egui::TextEdit::singleline(&mut dialog.text).desired_width(f32::INFINITY));
+                if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    save = true;
+                } else if !r.has_focus() {
+                    r.request_focus();
+                }
+                ui.add_space(6.0);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button(RichText::new("Save").strong()).clicked() {
+                        save = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        close = true;
+                    }
+                });
+            });
+            let text = dialog.text.trim().to_owned();
+            if save && !text.is_empty() {
+                let keys = dialog.keys.clone();
+                self.core.send(if dialog.tag {
+                    Command::SetTag {
+                        keys,
+                        tag: text,
+                        on: true,
+                    }
+                } else {
+                    Command::SetCategory {
+                        keys,
+                        category: Some(text),
+                    }
+                });
+                close = true;
+            }
+            if close || response.should_close() {
+                self.name = None;
+            }
+        }
+
+        if let Some(dialog) = &mut self.feeds {
+            let (mut close, mut save) = (false, false);
+            let core = &self.core;
+            let snap = &self.snap;
+            let response = egui::Modal::new(egui::Id::unique("feeds")).show(ctx, |ui| {
+                ui.set_width(560.0);
+                ui.heading("Feeds");
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(
+                        "RSS and Atom feeds are read every 15 minutes. Every item whose title has all \
+                         the “must have” words and none of the “must not have” words is downloaded, \
+                         once. With no words, every item is.",
+                    )
+                    .weak(),
+                );
+                ui.add_space(6.0);
+                let mut gone: Option<usize> = None;
+                egui::ScrollArea::vertical().max_height(380.0).show(ui, |ui| {
+                    if dialog.feeds.is_empty() {
+                        ui.label(RichText::new("No feeds yet.").weak());
+                    }
+                    for (i, feed) in dialog.feeds.iter_mut().enumerate() {
+                        ui.push_id(i, |ui| {
+                            ui.group(|ui| {
+                                ui.set_width(ui.available_width());
+                                ui.horizontal(|ui| {
+                                    ui.checkbox(&mut feed.enabled, "On");
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        if ui.button("Remove").clicked() {
+                                            gone = Some(i);
+                                        }
+                                        ui.add(
+                                            egui::TextEdit::singleline(&mut feed.name)
+                                                .hint_text("Name")
+                                                .desired_width(f32::INFINITY),
+                                        );
+                                    });
+                                });
+                                egui::Grid::new("feed")
+                                    .num_columns(2)
+                                    .spacing([10.0, 4.0])
+                                    .show(ui, |ui| {
+                                        let line = |ui: &mut egui::Ui, label: &str, text: &mut String, hint: &str| {
+                                            ui.label(RichText::new(label).weak());
+                                            ui.add(
+                                                egui::TextEdit::singleline(text)
+                                                    .hint_text(hint)
+                                                    .desired_width(f32::INFINITY),
+                                            );
+                                            ui.end_row();
+                                        };
+                                        line(ui, "Address", &mut feed.url, "https://…");
+                                        line(ui, "Must have", &mut feed.include, "words, separated by spaces");
+                                        line(ui, "Must not have", &mut feed.exclude, "words, separated by spaces");
+                                        line(ui, "Category", &mut dialog.categories[i], "none");
+                                    });
+                                let state = snap.feeds.iter().find(|f| f.feed.url == feed.url.trim());
+                                let status = match state {
+                                    None => RichText::new("Not saved yet").weak(),
+                                    Some(f) => match (&f.error, f.checked_at) {
+                                        (Some(e), _) => RichText::new(e).color(color(State::Error)),
+                                        (None, 0) => RichText::new("Not read yet").weak(),
+                                        (None, at) => RichText::new(format!(
+                                            "Read {} ago",
+                                            format::duration(now().saturating_sub(at))
+                                        ))
+                                        .weak(),
+                                    },
+                                };
+                                ui.add(egui::Label::new(status.small()).truncate());
+                            });
+                        });
+                    }
+                });
+                if let Some(i) = gone {
+                    dialog.feeds.remove(i);
+                    dialog.categories.remove(i);
+                }
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button("+ Add feed").clicked() {
+                        dialog.feeds.push(Feed::default());
+                        dialog.categories.push(String::new());
+                    }
+                    if ui
+                        .add_enabled(!snap.feeds.is_empty(), egui::Button::new("Read all now"))
+                        .clicked()
+                    {
+                        core.send(Command::CheckFeeds);
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button(RichText::new("Save").strong()).clicked() {
+                            save = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+            });
+            if save {
+                let feeds = dialog
+                    .feeds
+                    .iter()
+                    .zip(&dialog.categories)
+                    .map(|(feed, category)| Feed {
+                        category: Some(category.trim().to_owned()).filter(|c| !c.is_empty()),
+                        ..feed.clone()
+                    })
+                    .collect();
+                core.send(Command::SetFeeds(feeds));
+                close = true;
+            }
+            if close || response.should_close() {
+                self.feeds = None;
             }
         }
     }
@@ -1106,6 +1487,15 @@ impl eframe::App for App {
         #[cfg(feature = "shot")]
         {
             shot(&ctx);
+            // Testing only: open the feeds window once the feeds have been read.
+            {
+                use std::sync::atomic::{AtomicBool, Ordering};
+                static OPENED: AtomicBool = AtomicBool::new(false);
+                let wanted = std::env::var("RUSTTORRENT_SHOT_TAB").is_ok_and(|t| t == "feeds");
+                if wanted && self.snap.ready && !OPENED.swap(true, Ordering::Relaxed) {
+                    self.feeds = Some(FeedsDialog::of(&self.snap));
+                }
+            }
             // Testing only: open the first torrent's details on a given tab.
             if let (None, Ok(tab), Some(&first)) =
                 (&self.focus, std::env::var("RUSTTORRENT_SHOT_TAB"), self.view.first())
@@ -1126,7 +1516,11 @@ impl eframe::App for App {
         }
 
         let typing = ctx.egui_wants_keyboard_input();
-        let no_dialog = self.add.is_none() && self.remove.is_none() && self.settings.is_none();
+        let no_dialog = self.add.is_none()
+            && self.remove.is_none()
+            && self.settings.is_none()
+            && self.name.is_none()
+            && self.feeds.is_none();
         if !typing
             && no_dialog
             && ctx.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace))

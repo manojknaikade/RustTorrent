@@ -11,6 +11,7 @@ use anyhow::{bail, Context};
 use serde::{Deserialize, Serialize};
 
 use crate::arbiter::Intent;
+use crate::feeds::Feed;
 use crate::rules::Schedule;
 
 pub const SCHEMA_VERSION: u32 = 1;
@@ -28,6 +29,8 @@ pub struct Settings {
     /// Stop seeding at this ratio, in percent (150 is a ratio of 1.5). 0 means no limit.
     pub ratio_limit_pct: u32,
     pub schedule: Schedule,
+    /// `.torrent` files put in this folder are added by themselves.
+    pub watch_dir: Option<PathBuf>,
 }
 
 impl Default for Settings {
@@ -42,6 +45,7 @@ impl Default for Settings {
             max_downloads: 0,
             ratio_limit_pct: 0,
             schedule: Schedule::default(),
+            watch_dir: None,
         }
     }
 }
@@ -51,6 +55,8 @@ impl Default for Settings {
 pub struct Record {
     pub intent: Intent,
     pub category: Option<String>,
+    /// Sorted, without repeats.
+    pub tags: Vec<String>,
     /// Bytes uploaded over the torrent's whole life, across restarts.
     pub uploaded: u64,
     /// Seconds since 1970.
@@ -63,6 +69,17 @@ pub struct Record {
     pub ratio_limit_pct: Option<u32>,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+#[serde(default)]
+pub struct FeedState {
+    /// Items already handed to the downloader, so they are not added twice.
+    pub seen: Vec<String>,
+    /// When the feed was last read, in seconds since 1970.
+    pub checked_at: u64,
+    /// Why the last read failed, if it did.
+    pub error: Option<String>,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(default)]
 pub struct Data {
@@ -71,6 +88,9 @@ pub struct Data {
     pub torrents: BTreeMap<String, Record>,
     /// Links that were added but whose details had not arrived when the app last quit.
     pub pending: Vec<String>,
+    pub feeds: Vec<Feed>,
+    /// What the app remembers about each feed, by the feed's address.
+    pub feed_state: BTreeMap<String, FeedState>,
 }
 
 impl Default for Data {
@@ -80,6 +100,8 @@ impl Default for Data {
             settings: Settings::default(),
             torrents: BTreeMap::new(),
             pending: Vec::new(),
+            feeds: Vec::new(),
+            feed_state: BTreeMap::new(),
         }
     }
 }
@@ -177,11 +199,26 @@ mod tests {
         store.data.settings.max_downloads = 2;
         store.data.settings.schedule.enabled = true;
         store.data.pending.push("magnet:?xt=urn:btih:abc".into());
+        store.data.settings.watch_dir = Some(PathBuf::from("/tmp/watch"));
+        store.data.feeds.push(Feed {
+            url: "https://example.org/feed".into(),
+            include: "debian".into(),
+            ..Default::default()
+        });
+        store.data.feed_state.insert(
+            "https://example.org/feed".into(),
+            FeedState {
+                seen: vec!["id-1".into()],
+                checked_at: 9,
+                error: None,
+            },
+        );
         store.data.torrents.insert(
             "00112233".into(),
             Record {
                 intent: Intent::Pause,
                 category: Some("Linux".into()),
+                tags: vec!["iso".into()],
                 uploaded: 42,
                 added_at: 7,
                 queue_pos: 3,

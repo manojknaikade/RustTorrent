@@ -5,6 +5,7 @@
 //! torrent engine directly.
 pub mod arbiter;
 mod engine;
+pub mod feeds;
 pub mod format;
 pub mod intake;
 pub mod model;
@@ -17,7 +18,8 @@ use std::time::{Duration, Instant};
 
 pub use arbiter::HoldReason;
 pub use engine::Command;
-pub use model::{FileMeta, Notice, PeerView, Snapshot, State, TorrentView};
+pub use feeds::Feed;
+pub use model::{FeedView, FileMeta, Notice, PeerView, Snapshot, State, TorrentView};
 pub use rules::{Move, Schedule};
 pub use store::Settings;
 
