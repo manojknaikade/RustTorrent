@@ -35,6 +35,8 @@ pub struct Settings {
     /// all while it is not connected. `None` uses whatever connection the system has.
     pub bind_interface: Option<String>,
     pub remote: RemoteSettings,
+    /// Port, peer finding, proxy and block list. Applied by starting a new engine session.
+    pub network: crate::network::NetworkSettings,
 }
 
 /// Remote control from a browser. Off until the user turns it on and sets a password.
@@ -84,6 +86,7 @@ impl Default for Settings {
             watch_dir: None,
             bind_interface: None,
             remote: RemoteSettings::default(),
+            network: Default::default(),
         }
     }
 }

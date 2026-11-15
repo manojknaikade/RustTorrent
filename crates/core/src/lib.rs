@@ -4,12 +4,14 @@
 //! it sends [`Command`]s and it reads the latest [`Snapshot`]. It never touches the
 //! torrent engine directly.
 pub mod arbiter;
+pub mod blocklist;
 mod engine;
 pub mod feeds;
 pub mod format;
 pub mod intake;
 pub mod model;
 pub mod net;
+pub mod network;
 pub mod remote;
 pub mod rules;
 pub mod store;
@@ -23,6 +25,7 @@ pub use engine::Command;
 pub use feeds::Feed;
 pub use model::{FeedView, FileMeta, Notice, PeerView, Snapshot, State, TorrentView};
 pub use net::Interface;
+pub use network::{NetworkSettings, NetworkStatus, ProxySettings};
 pub use rules::{Move, Schedule};
 pub use store::{RemoteSettings, Settings};
 

@@ -148,4 +148,6 @@ pub struct Snapshot {
     pub remote_on: bool,
     /// Why the remote-control page could not be served.
     pub remote_error: Option<String>,
+    /// What the running engine uses: the port in use and how many ranges are blocked.
+    pub network: crate::network::NetworkStatus,
 }
