@@ -102,6 +102,15 @@ pub enum Command {
     /// The torrent whose peers the front end wants to see.
     Watch(Option<String>),
     Shutdown,
+    /// Make a `.torrent` file from a file or folder, in the background. See [`crate::make`].
+    CreateTorrent(crate::make::MakeOptions),
+    /// Stop making the `.torrent` file.
+    CancelCreate,
+    /// Write a torrent's `.torrent` file here. Needs the torrent's details.
+    SaveTorrentFile {
+        key: String,
+        path: PathBuf,
+    },
 }
 
 type Handle = Arc<ManagedTorrent>;
@@ -185,7 +194,15 @@ struct Worker {
     remote_task: Option<tokio::task::JoinHandle<()>>,
     remote_error: Option<String>,
     remote_try: Option<Instant>,
+    /// The `.torrent` file being made, or the last one made.
+    making: Option<make::Making>,
+    /// Counts the `.torrent` files made.
+    jobs: u64,
+    /// What each torrent's file says about itself, by key.
+    details: Arc<HashMap<String, crate::make::Details>>,
 }
+
+mod make;
 
 pub(crate) fn run(
     data_dir: PathBuf,
@@ -257,6 +274,9 @@ async fn main_loop(
         remote_task: None,
         remote_error: None,
         remote_try: None,
+        making: None,
+        jobs: 0,
+        details: Arc::default(),
     };
     if let Some(note) = note {
         w.notice(note, true);
@@ -849,6 +869,9 @@ impl Worker {
                 }
             }
             Command::Watch(key) => self.watched = key,
+            Command::CreateTorrent(opts) => self.start_make(opts),
+            Command::CancelCreate => self.cancel_make(),
+            Command::SaveTorrentFile { key, path } => self.save_torrent_file(&key, path),
             Command::Shutdown => {}
         }
     }
@@ -1201,6 +1224,7 @@ impl Worker {
             self.start_remote().await;
         }
 
+        let (making, details) = self.make_tick().await;
         let snapshot = Snapshot {
             ready: true,
             fatal: None,
@@ -1228,6 +1252,8 @@ impl Worker {
             interfaces: self.interfaces.clone(),
             remote_on: self.remote_task.is_some(),
             remote_error: self.remote_error.clone(),
+            making,
+            details,
         };
         let mut current = self.shared.lock().unwrap_or_else(|e| e.into_inner());
         if **current != snapshot {

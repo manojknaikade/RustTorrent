@@ -148,4 +148,9 @@ pub struct Snapshot {
     pub remote_on: bool,
     /// Why the remote-control page could not be served.
     pub remote_error: Option<String>,
+    /// The torrent file being created, or the last one created.
+    pub making: Option<crate::make::MakeView>,
+    /// What each torrent's file says about itself, by key. Missing until the details
+    /// of a link have arrived.
+    pub details: Arc<std::collections::HashMap<String, crate::make::Details>>,
 }

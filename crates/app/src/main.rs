@@ -5,6 +5,7 @@
 mod app;
 #[cfg(target_os = "macos")]
 mod mac;
+mod make;
 
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
