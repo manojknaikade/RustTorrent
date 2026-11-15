@@ -3,6 +3,11 @@
 //! One worker owns the engine session and the store. It takes commands, and once a second
 //! it compares what each torrent is doing with what the arbiter says it should be doing,
 //! fixes any difference, and publishes a snapshot if anything changed.
+//!
+//! The engine session ties every socket to one network interface when it starts. So when
+//! the user has chosen an interface, the session only exists while that interface is
+//! connected: the worker stops it when the interface goes away and starts a new one when
+//! it is back. While there is no session nothing is sent or received.
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::num::NonZeroU32;
@@ -24,6 +29,7 @@ use crate::arbiter::{decide, Decision, HoldReason, Intent};
 use crate::feeds::{self, Feed};
 use crate::intake::{self, Source};
 use crate::model::{FeedView, FileMeta, Notice, PeerView, Snapshot, State, TorrentView};
+use crate::net::{self, Interface};
 use crate::rules::{self, Clock, Move, Schedule};
 use crate::store::{Record, Store};
 use crate::{now_secs, Shared};
@@ -77,6 +83,8 @@ pub enum Command {
         tag: String,
         on: bool,
     },
+    /// The one network interface all traffic must use, or `None` for any.
+    SetInterface(Option<String>),
     /// The folder to watch for `.torrent` files, or none.
     SetWatchDir(Option<PathBuf>),
     /// Replaces the list of feeds.
@@ -98,6 +106,8 @@ const SCAN_EVERY: Duration = Duration::from_secs(5);
 const FEED_EVERY: u64 = 15 * 60;
 const FEED_MAX_BYTES: usize = 8 * 1024 * 1024;
 const KEEP_SEEN: usize = 2000;
+/// How long to wait before trying again to start the engine.
+const RETRY_EVERY: Duration = Duration::from_secs(5);
 
 struct Pending {
     id: u64,
@@ -106,7 +116,8 @@ struct Pending {
     added_at: u64,
     /// The category the torrent gets once it is added.
     category: Option<String>,
-    task: tokio::task::JoinHandle<()>,
+    /// The work of adding it. `None` while there is no engine to add it to.
+    task: Option<tokio::task::JoinHandle<()>>,
 }
 
 struct FeedDone {
@@ -129,7 +140,16 @@ struct Meta {
 }
 
 struct Worker {
-    session: Arc<Session>,
+    /// `None` while all traffic is blocked.
+    session: Option<Arc<Session>>,
+    data_dir: PathBuf,
+    /// The interface the running session is tied to, and the number the system gave it.
+    bound: Option<String>,
+    bound_index: Option<u32>,
+    /// Why there is no session.
+    blocked: Option<String>,
+    last_try: Option<Instant>,
+    interfaces: Vec<Interface>,
     store: Store,
     log_path: PathBuf,
     shared: Shared,
@@ -147,7 +167,8 @@ struct Worker {
     last_scan: Option<Instant>,
     /// Files in the watch folder that could not be handled, so they are reported once.
     watch_failed: HashSet<PathBuf>,
-    http: reqwest::Client,
+    /// For reading feeds. Tied to the same interface as the session.
+    http: Option<reqwest::Client>,
     feed_tx: UnboundedSender<FeedDone>,
     /// Feeds being read right now.
     feeds_busy: HashSet<String>,
@@ -183,39 +204,19 @@ async fn main_loop(
 ) -> anyhow::Result<()> {
     std::fs::create_dir_all(&data_dir).map_err(|e| anyhow::anyhow!("Could not create {}: {e}", data_dir.display()))?;
     let (store, note) = Store::load(&data_dir.join("state.json"))?;
-    let settings = store.data.settings.clone();
-
-    let options = SessionOptions {
-        fastresume: true,
-        persistence: Some(SessionPersistenceConfig::Json {
-            folder: Some(data_dir.join("session")),
-        }),
-        listen: Some(ListenerOptions {
-            enable_upnp_port_forwarding: true,
-            ..Default::default()
-        }),
-        ratelimits: LimitsConfig {
-            download_bps: limit(settings.down_limit_kib),
-            upload_bps: limit(settings.up_limit_kib),
-        },
-        client_name_and_version: Some(format!("RustTorrent {}", crate::VERSION)),
-        ..Default::default()
-    };
-    let session = Session::new_with_opts(settings.download_dir.clone(), options)
-        .await
-        .map_err(|e| anyhow::anyhow!("The torrent engine could not start: {e:#}"))?;
 
     let (add_tx, mut add_rx) = tokio::sync::mpsc::unbounded_channel();
     let (feed_tx, mut feed_rx) = tokio::sync::mpsc::unbounded_channel();
-    let http = reqwest::Client::builder()
-        .user_agent(format!("RustTorrent/{}", crate::VERSION))
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|e| anyhow::anyhow!("Could not set up the feed reader: {e}"))?;
     let mut w = Worker {
-        session,
+        session: None,
+        bound: None,
+        bound_index: None,
+        blocked: None,
+        last_try: None,
+        interfaces: Vec::new(),
         store,
         log_path: data_dir.join("rusttorrent.log"),
+        data_dir,
         shared,
         on_change,
         notices: Vec::new(),
@@ -229,7 +230,7 @@ async fn main_loop(
         last_save: Instant::now(),
         last_scan: None,
         watch_failed: HashSet::new(),
-        http,
+        http: None,
         feed_tx,
         feeds_busy: HashSet::new(),
     };
@@ -277,12 +278,8 @@ async fn main_loop(
         }
     }
 
-    for p in w.pending.drain(..) {
-        p.task.abort();
-    }
-    w.collect_uploads();
+    w.stop_session().await;
     w.save();
-    w.session.stop().await;
     Ok(())
 }
 
@@ -324,7 +321,10 @@ impl Worker {
     }
 
     fn handles(&self) -> Vec<Handle> {
-        self.session.with_torrents(|it| it.map(|(_, h)| h.clone()).collect())
+        match &self.session {
+            Some(session) => session.with_torrents(|it| it.map(|(_, h)| h.clone()).collect()),
+            None => Vec::new(),
+        }
     }
 
     fn find(&self, key: &str) -> Option<Handle> {
@@ -343,20 +343,7 @@ impl Worker {
         let label = intake::label(&source);
         let id = self.next_pending;
         self.next_pending += 1;
-
-        let session = self.session.clone();
-        let tx = self.add_tx.clone();
-        let folder = self.store.data.settings.download_dir.to_string_lossy().into_owned();
-        let (task_text, task_label) = (text.clone(), label.clone());
-        let task = tokio::spawn(async move {
-            let result = add_to_engine(&session, source, folder).await;
-            let _ = tx.send(AddDone {
-                id,
-                text: task_text,
-                label: task_label,
-                result,
-            });
-        });
+        let task = self.start_add(id, &text, &label);
         self.pending.push(Pending {
             id,
             text: text.clone(),
@@ -367,6 +354,171 @@ impl Worker {
         });
         self.store.data.pending.push(text);
         self.save();
+    }
+
+    /// Starts the work of adding a link or file to the engine, if there is an engine.
+    fn start_add(&self, id: u64, text: &str, label: &str) -> Option<tokio::task::JoinHandle<()>> {
+        let session = self.session.clone()?;
+        let source = intake::parse(text).ok()?;
+        let tx = self.add_tx.clone();
+        let folder = self.store.data.settings.download_dir.to_string_lossy().into_owned();
+        let (text, label) = (text.to_owned(), label.to_owned());
+        Some(tokio::spawn(async move {
+            let result = add_to_engine(&session, source, folder).await;
+            let _ = tx.send(AddDone {
+                id,
+                text,
+                label,
+                result,
+            });
+        }))
+    }
+
+    /// Stops the engine, so that nothing is sent or received until a new one starts.
+    async fn stop_session(&mut self) {
+        self.collect_uploads();
+        for p in &mut self.pending {
+            if let Some(task) = p.task.take() {
+                task.abort();
+            }
+        }
+        if let Some(session) = self.session.take() {
+            session.stop().await;
+        }
+        self.http = None;
+        self.bound = None;
+        self.bound_index = None;
+        self.last_up.clear();
+    }
+
+    async fn start_session(&mut self, bind: Option<String>) -> anyhow::Result<()> {
+        let settings = &self.store.data.settings;
+        let options = SessionOptions {
+            fastresume: true,
+            persistence: Some(SessionPersistenceConfig::Json {
+                folder: Some(self.data_dir.join("session")),
+            }),
+            listen: Some(ListenerOptions {
+                enable_upnp_port_forwarding: true,
+                ..Default::default()
+            }),
+            ratelimits: LimitsConfig {
+                download_bps: limit(settings.down_limit_kib),
+                upload_bps: limit(settings.up_limit_kib),
+            },
+            client_name_and_version: Some(format!("RustTorrent {}", crate::VERSION)),
+            bind_device_name: bind.clone(),
+            ..Default::default()
+        };
+        // Read before the session starts: if the interface is replaced while it starts,
+        // the next look sees a different number and starts again.
+        let index = bind.as_deref().and_then(net::index);
+        let session = Session::new_with_opts(settings.download_dir.clone(), options).await?;
+        self.http = http_client(bind.as_deref());
+        self.session = Some(session);
+        self.bound = bind;
+        self.bound_index = index;
+        for i in 0..self.pending.len() {
+            if self.pending[i].task.is_none() {
+                let p = &self.pending[i];
+                let task = self.start_add(p.id, &p.text, &p.label);
+                self.pending[i].task = task;
+            }
+        }
+        Ok(())
+    }
+
+    /// Makes the engine match the chosen interface: stopped while that interface is not
+    /// connected or after the choice changed, running otherwise.
+    async fn ensure_session(&mut self) {
+        self.interfaces = net::interfaces();
+        let wanted = self.store.data.settings.bind_interface.clone();
+        let up = wanted
+            .as_ref()
+            .is_none_or(|name| self.interfaces.iter().any(|i| i.name == *name));
+        if self.session.is_some() {
+            let replaced = wanted.is_some() && wanted.as_deref().and_then(net::index) != self.bound_index;
+            if self.bound == wanted && up && !replaced {
+                return;
+            }
+            self.stop_session().await;
+            self.blocked = None;
+            self.last_try = None;
+        }
+        if !up {
+            let name = wanted.unwrap_or_default();
+            let text = format!("All traffic is blocked: the network interface {name} is not connected.");
+            if self.blocked.as_deref() != Some(text.as_str()) {
+                self.notice(text.clone(), true);
+            }
+            self.blocked = Some(text);
+            self.last_try = None;
+            return;
+        }
+        if self.last_try.is_some_and(|t| t.elapsed() < RETRY_EVERY) {
+            return;
+        }
+        self.last_try = Some(Instant::now());
+        match self.start_session(wanted.clone()).await {
+            Ok(()) => {
+                self.last_try = None;
+                match (&wanted, self.blocked.take()) {
+                    (Some(name), _) => self.notice(format!("All traffic goes through {name}."), false),
+                    (None, Some(_)) => self.notice("The torrent engine is running again.", false),
+                    (None, None) => {}
+                }
+            }
+            Err(e) => {
+                let text = format!("All traffic is blocked: the torrent engine could not start: {e:#}");
+                if self.blocked.as_deref() != Some(text.as_str()) {
+                    self.notice(text.clone(), true);
+                }
+                self.blocked = Some(text);
+            }
+        }
+    }
+
+    /// The list as it was last seen, for when there is no engine to ask.
+    fn blocked_views(&self) -> Vec<TorrentView> {
+        let folder = self.store.data.settings.download_dir.to_string_lossy().into_owned();
+        self.store
+            .data
+            .torrents
+            .iter()
+            .map(|(key, record)| TorrentView {
+                key: key.clone(),
+                name: if record.name.is_empty() {
+                    key.clone()
+                } else {
+                    record.name.clone()
+                },
+                state: match record.intent {
+                    Intent::Run => State::Blocked,
+                    Intent::Pause if record.finished => State::Completed,
+                    Intent::Pause => State::Paused,
+                },
+                error: None,
+                total: record.total,
+                done: record.done,
+                uploaded: record.uploaded,
+                down_bps: 0,
+                up_bps: 0,
+                peers_live: 0,
+                peers_seen: 0,
+                category: record.category.clone(),
+                tags: record.tags.clone(),
+                save_path: folder.clone(),
+                added_at: record.added_at,
+                held: None,
+                queue_pos: None,
+                ratio_limit_pct: record.ratio_limit_pct,
+                files: self.meta.get(key).map(|m| m.files.clone()).unwrap_or_default(),
+                file_done: Vec::new(),
+                selected: None,
+                trackers: self.meta.get(key).map(|m| m.trackers.clone()).unwrap_or_default(),
+                peers: Vec::new(),
+            })
+            .collect()
     }
 
     fn added(&mut self, done: AddDone) {
@@ -442,18 +594,20 @@ impl Worker {
                     if let Some(id) = key.strip_prefix("pending:").and_then(|n| n.parse::<u64>().ok()) {
                         if let Some(i) = self.pending.iter().position(|p| p.id == id) {
                             let p = self.pending.remove(i);
-                            p.task.abort();
+                            if let Some(task) = p.task {
+                                task.abort();
+                            }
                             self.store.data.pending.retain(|t| *t != p.text);
                         }
                         continue;
                     }
+                    let Some(session) = self.session.clone() else {
+                        self.notice("Torrents cannot be removed while all traffic is blocked.", true);
+                        break;
+                    };
                     let Some(handle) = self.find(&key) else { continue };
                     let name = handle.name().unwrap_or_else(|| key.clone());
-                    match self
-                        .session
-                        .delete(TorrentIdOrHash::Id(handle.id()), delete_files)
-                        .await
-                    {
+                    match session.delete(TorrentIdOrHash::Id(handle.id()), delete_files).await {
                         Ok(()) => {
                             self.store.data.torrents.remove(&key);
                             self.last_up.remove(&key);
@@ -471,9 +625,12 @@ impl Worker {
                 self.save();
             }
             Command::SetFiles { key, files } => {
+                let Some(session) = self.session.clone() else {
+                    return self.notice("Files cannot be chosen while all traffic is blocked.", true);
+                };
                 let Some(handle) = self.find(&key) else { return };
                 let set: HashSet<usize> = files.into_iter().collect();
-                if let Err(e) = self.session.update_only_files(&handle, &set).await {
+                if let Err(e) = session.update_only_files(&handle, &set).await {
                     let name = handle.name().unwrap_or(key);
                     self.notice(format!("Could not change the chosen files of {name}: {e:#}"), true);
                 }
@@ -481,8 +638,10 @@ impl Worker {
             Command::SetLimits { down_kib, up_kib } => {
                 self.store.data.settings.down_limit_kib = down_kib;
                 self.store.data.settings.up_limit_kib = up_kib;
-                self.session.ratelimits.set_download_bps(limit(down_kib));
-                self.session.ratelimits.set_upload_bps(limit(up_kib));
+                if let Some(session) = &self.session {
+                    session.ratelimits.set_download_bps(limit(down_kib));
+                    session.ratelimits.set_upload_bps(limit(up_kib));
+                }
                 self.save();
             }
             Command::SetDownloadDir(dir) => {
@@ -544,6 +703,10 @@ impl Worker {
                         }
                     }
                 }
+                self.save();
+            }
+            Command::SetInterface(name) => {
+                self.store.data.settings.bind_interface = name.map(|n| n.trim().to_owned()).filter(|n| !n.is_empty());
                 self.save();
             }
             Command::SetWatchDir(dir) => {
@@ -624,6 +787,7 @@ impl Worker {
 
     /// Starts reading every feed whose turn has come.
     fn poll_feeds(&mut self) {
+        let Some(http) = self.http.clone() else { return };
         let now = now_secs();
         for feed in &self.store.data.feeds {
             let checked_at = self.store.data.feed_state.get(&feed.url).map_or(0, |s| s.checked_at);
@@ -631,7 +795,7 @@ impl Worker {
                 continue;
             }
             self.feeds_busy.insert(feed.url.clone());
-            let (http, tx, url) = (self.http.clone(), self.feed_tx.clone(), feed.url.clone());
+            let (http, tx, url) = (http.clone(), self.feed_tx.clone(), feed.url.clone());
             tokio::spawn(async move {
                 let result = fetch_feed(&http, &url).await;
                 let _ = tx.send(FeedDone { url, result });
@@ -753,131 +917,150 @@ impl Worker {
             self.last_scan = Some(Instant::now());
             self.scan_watch_dir();
         }
+        self.ensure_session().await;
         self.poll_feeds();
 
         let mut torrents = Vec::new();
         let (mut down_total, mut up_total) = (0, 0);
-
-        // First look at every torrent, then let the rules see them all together.
-        let mut rows = Vec::new();
-        for handle in self.handles() {
-            let key = handle.info_hash().as_string();
-            let stats = handle.stats();
-            if !self.store.data.torrents.contains_key(&key) {
-                let queue_pos = self.next_queue_pos();
-                // The engine knows a torrent the store does not (for example the state file
-                // was lost). Keep it as it is rather than starting or stopping it.
-                let intent = if handle.is_paused() { Intent::Pause } else { Intent::Run };
-                self.store.data.torrents.insert(
-                    key.clone(),
-                    Record {
-                        intent,
-                        added_at: now_secs(),
-                        queue_pos,
-                        ..Default::default()
-                    },
-                );
-                self.dirty = true;
-            }
-            let live = matches!(stats.state, TorrentStatsState::Live);
-            self.count_upload(&key, live, stats.uploaded_bytes);
-            rows.push((handle, key, stats));
-        }
-        let items: Vec<rules::Item> = rows.iter().map(|(_, key, stats)| self.item(key, stats)).collect();
         let now = chrono::Local::now();
         let clock = Clock {
             weekday: now.weekday().num_days_from_monday() as u8,
             minute: (now.hour() * 60 + now.minute()) as u16,
         };
-        let outcomes = rules::apply(&items, &self.store.data.settings, clock);
         let schedule_off = !self.store.data.settings.schedule.allows(clock);
 
-        for ((handle, key, stats), outcome) in rows.into_iter().zip(outcomes) {
-            // Make the engine match what the arbiter decides.
-            let intent = self.store.data.torrents[&key].intent;
-            let decision = decide(intent, outcome.holds);
-            let should_run = decision == Decision::Run;
-            let held = match decision {
-                Decision::Held(reason) => Some(reason),
-                _ => None,
-            };
-            let fix = match stats.state {
-                TorrentStatsState::Live if !should_run => Some((self.session.pause(&handle).await, Intent::Run)),
-                TorrentStatsState::Paused if should_run => Some((self.session.unpause(&handle).await, Intent::Pause)),
-                _ => None,
-            };
-            if let Some((Err(e), actual)) = fix {
-                let name = handle.name().unwrap_or_else(|| key.clone());
-                let verb = if should_run { "resume" } else { "pause" };
-                self.notice(format!("Could not {verb} {name}: {e:#}"), true);
-                // Record what is true, so this is not retried and reported every second.
-                if let Some(record) = self.store.data.torrents.get_mut(&key) {
-                    record.intent = actual;
+        if let Some(session) = self.session.clone() {
+            // First look at every torrent, then let the rules see them all together.
+            let mut rows = Vec::new();
+            for handle in self.handles() {
+                let key = handle.info_hash().as_string();
+                let stats = handle.stats();
+                if !self.store.data.torrents.contains_key(&key) {
+                    let queue_pos = self.next_queue_pos();
+                    // The engine knows a torrent the store does not (for example the state file
+                    // was lost). Keep it as it is rather than starting or stopping it.
+                    let intent = if handle.is_paused() { Intent::Pause } else { Intent::Run };
+                    self.store.data.torrents.insert(
+                        key.clone(),
+                        Record {
+                            intent,
+                            added_at: now_secs(),
+                            queue_pos,
+                            ..Default::default()
+                        },
+                    );
+                    self.dirty = true;
                 }
-                self.dirty = true;
+                let live = matches!(stats.state, TorrentStatsState::Live);
+                self.count_upload(&key, live, stats.uploaded_bytes);
+                // Remember what the list shows, for when the engine is not running.
+                if let Some(record) = self.store.data.torrents.get_mut(&key) {
+                    let name = handle.name().unwrap_or_default();
+                    let seen = (stats.total_bytes, stats.progress_bytes, stats.finished);
+                    if (!name.is_empty() && record.name != name) || (record.total, record.done, record.finished) != seen
+                    {
+                        if !name.is_empty() {
+                            record.name = name;
+                        }
+                        (record.total, record.done, record.finished) = seen;
+                        self.dirty = true;
+                    }
+                }
+                rows.push((handle, key, stats));
             }
+            let items: Vec<rules::Item> = rows.iter().map(|(_, key, stats)| self.item(key, stats)).collect();
+            let outcomes = rules::apply(&items, &self.store.data.settings, clock);
 
-            let state = match stats.state {
-                TorrentStatsState::Initializing { .. } => State::Checking,
-                TorrentStatsState::Live if stats.finished => State::Seeding,
-                TorrentStatsState::Live => State::Downloading,
-                TorrentStatsState::Paused if held == Some(HoldReason::Schedule) => State::Scheduled,
-                TorrentStatsState::Paused if held == Some(HoldReason::Queue) => State::Queued,
-                TorrentStatsState::Paused if stats.finished => State::Completed,
-                TorrentStatsState::Paused => State::Paused,
-                TorrentStatsState::Error => State::Error,
-            };
-            let (down_bps, up_bps, peers_live, peers_seen) = match &stats.live {
-                Some(l) => (
-                    l.download_speed.as_bytes(),
-                    l.upload_speed.as_bytes(),
-                    l.snapshot.peer_stats.live,
-                    l.snapshot.peer_stats.seen,
-                ),
-                None => (0, 0, 0, 0),
-            };
-            down_total += down_bps;
-            up_total += up_bps;
+            for ((handle, key, stats), outcome) in rows.into_iter().zip(outcomes) {
+                // Make the engine match what the arbiter decides.
+                let intent = self.store.data.torrents[&key].intent;
+                let decision = decide(intent, outcome.holds);
+                let should_run = decision == Decision::Run;
+                let held = match decision {
+                    Decision::Held(reason) => Some(reason),
+                    _ => None,
+                };
+                let fix = match stats.state {
+                    TorrentStatsState::Live if !should_run => Some((session.pause(&handle).await, Intent::Run)),
+                    TorrentStatsState::Paused if should_run => Some((session.unpause(&handle).await, Intent::Pause)),
+                    _ => None,
+                };
+                if let Some((Err(e), actual)) = fix {
+                    let name = handle.name().unwrap_or_else(|| key.clone());
+                    let verb = if should_run { "resume" } else { "pause" };
+                    self.notice(format!("Could not {verb} {name}: {e:#}"), true);
+                    // Record what is true, so this is not retried and reported every second.
+                    if let Some(record) = self.store.data.torrents.get_mut(&key) {
+                        record.intent = actual;
+                    }
+                    self.dirty = true;
+                }
 
-            let peers = if self.watched.as_deref() == Some(key.as_str()) {
-                peers_of(&handle)
-            } else {
-                Vec::new()
-            };
-            let (files, trackers) = self.meta_for(&key, &handle);
-            let record = &self.store.data.torrents[&key];
-            torrents.push(TorrentView {
-                name: handle.name().unwrap_or_else(|| key.clone()),
-                state,
-                error: stats.error.clone(),
-                total: stats.total_bytes,
-                done: stats.progress_bytes,
-                uploaded: record.uploaded,
-                down_bps,
-                up_bps,
-                peers_live,
-                peers_seen,
-                category: record.category.clone(),
-                tags: record.tags.clone(),
-                save_path: handle.output_folder().to_string_lossy().into_owned(),
-                added_at: record.added_at,
-                held,
-                queue_pos: outcome.queue_pos,
-                ratio_limit_pct: record.ratio_limit_pct,
-                files,
-                file_done: stats.file_progress.clone(),
-                selected: handle.only_files(),
-                trackers,
-                peers,
-                key,
-            });
+                let state = match stats.state {
+                    TorrentStatsState::Initializing { .. } => State::Checking,
+                    TorrentStatsState::Live if stats.finished => State::Seeding,
+                    TorrentStatsState::Live => State::Downloading,
+                    TorrentStatsState::Paused if held == Some(HoldReason::Schedule) => State::Scheduled,
+                    TorrentStatsState::Paused if held == Some(HoldReason::Queue) => State::Queued,
+                    TorrentStatsState::Paused if stats.finished => State::Completed,
+                    TorrentStatsState::Paused => State::Paused,
+                    TorrentStatsState::Error => State::Error,
+                };
+                let (down_bps, up_bps, peers_live, peers_seen) = match &stats.live {
+                    Some(l) => (
+                        l.download_speed.as_bytes(),
+                        l.upload_speed.as_bytes(),
+                        l.snapshot.peer_stats.live,
+                        l.snapshot.peer_stats.seen,
+                    ),
+                    None => (0, 0, 0, 0),
+                };
+                down_total += down_bps;
+                up_total += up_bps;
+
+                let peers = if self.watched.as_deref() == Some(key.as_str()) {
+                    peers_of(&handle)
+                } else {
+                    Vec::new()
+                };
+                let (files, trackers) = self.meta_for(&key, &handle);
+                let record = &self.store.data.torrents[&key];
+                torrents.push(TorrentView {
+                    name: handle.name().unwrap_or_else(|| key.clone()),
+                    state,
+                    error: stats.error.clone(),
+                    total: stats.total_bytes,
+                    done: stats.progress_bytes,
+                    uploaded: record.uploaded,
+                    down_bps,
+                    up_bps,
+                    peers_live,
+                    peers_seen,
+                    category: record.category.clone(),
+                    tags: record.tags.clone(),
+                    save_path: handle.output_folder().to_string_lossy().into_owned(),
+                    added_at: record.added_at,
+                    held,
+                    queue_pos: outcome.queue_pos,
+                    ratio_limit_pct: record.ratio_limit_pct,
+                    files,
+                    file_done: stats.file_progress.clone(),
+                    selected: handle.only_files(),
+                    trackers,
+                    peers,
+                    key,
+                });
+            }
+        } else {
+            torrents = self.blocked_views();
         }
 
+        let blocked = self.session.is_none();
         for p in &self.pending {
             torrents.push(TorrentView {
                 key: format!("pending:{}", p.id),
                 name: p.label.clone(),
-                state: State::FetchingInfo,
+                state: if blocked { State::Blocked } else { State::FetchingInfo },
                 error: None,
                 total: 0,
                 done: 0,
@@ -928,6 +1111,8 @@ impl Worker {
                 })
                 .collect(),
             notices: self.notices.clone(),
+            blocked: blocked.then(|| self.blocked.clone().unwrap_or_default()),
+            interfaces: self.interfaces.clone(),
         };
         let mut current = self.shared.lock().unwrap_or_else(|e| e.into_inner());
         if **current != snapshot {
@@ -959,6 +1144,24 @@ fn peers_of(handle: &Handle) -> Vec<PeerView> {
         .collect();
     peers.sort_by(|a, b| b.downloaded.cmp(&a.downloaded).then_with(|| a.addr.cmp(&b.addr)));
     peers
+}
+
+/// The client that reads feeds, tied to the interface if one is chosen. `None` if it
+/// cannot be tied to it: then feeds are not read at all rather than read some other way.
+fn http_client(bind: Option<&str>) -> Option<reqwest::Client> {
+    let builder = reqwest::Client::builder()
+        .user_agent(format!("RustTorrent/{}", crate::VERSION))
+        .timeout(Duration::from_secs(30));
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "android"))]
+    let builder = match bind {
+        Some(name) => builder.interface(name),
+        None => builder,
+    };
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "android")))]
+    if bind.is_some() {
+        return None;
+    }
+    builder.build().ok()
 }
 
 async fn fetch_feed(http: &reqwest::Client, url: &str) -> Result<String, String> {

@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use crate::arbiter::HoldReason;
 use crate::feeds::Feed;
+use crate::net::Interface;
 use crate::store::Settings;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
@@ -21,6 +22,9 @@ pub enum State {
     Scheduled,
     /// Finished and not seeding.
     Completed,
+    /// Wants to run, but all traffic is blocked because the chosen network interface is
+    /// not connected.
+    Blocked,
     Error,
 }
 
@@ -35,6 +39,7 @@ impl State {
             State::Queued => "Queued",
             State::Scheduled => "Off by schedule",
             State::Completed => "Completed",
+            State::Blocked => "Blocked",
             State::Error => "Error",
         }
     }
@@ -135,4 +140,8 @@ pub struct Snapshot {
     pub feeds: Vec<FeedView>,
     /// Recent messages, oldest first.
     pub notices: Vec<Notice>,
+    /// Set while the engine is stopped and nothing is sent or received: says why.
+    pub blocked: Option<String>,
+    /// The network interfaces that are connected right now.
+    pub interfaces: Vec<Interface>,
 }

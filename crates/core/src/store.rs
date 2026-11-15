@@ -31,6 +31,9 @@ pub struct Settings {
     pub schedule: Schedule,
     /// `.torrent` files put in this folder are added by themselves.
     pub watch_dir: Option<PathBuf>,
+    /// Send and receive everything through this network interface alone, and nothing at
+    /// all while it is not connected. `None` uses whatever connection the system has.
+    pub bind_interface: Option<String>,
 }
 
 impl Default for Settings {
@@ -46,6 +49,7 @@ impl Default for Settings {
             ratio_limit_pct: 0,
             schedule: Schedule::default(),
             watch_dir: None,
+            bind_interface: None,
         }
     }
 }
@@ -67,6 +71,12 @@ pub struct Record {
     /// This torrent's own ratio limit in percent, instead of the one in the settings.
     /// 0 means no limit.
     pub ratio_limit_pct: Option<u32>,
+    /// Name, size and progress as last seen, so the list can be shown while the engine
+    /// is not running.
+    pub name: String,
+    pub total: u64,
+    pub done: u64,
+    pub finished: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
@@ -200,6 +210,7 @@ mod tests {
         store.data.settings.schedule.enabled = true;
         store.data.pending.push("magnet:?xt=urn:btih:abc".into());
         store.data.settings.watch_dir = Some(PathBuf::from("/tmp/watch"));
+        store.data.settings.bind_interface = Some("utun4".into());
         store.data.feeds.push(Feed {
             url: "https://example.org/feed".into(),
             include: "debian".into(),
@@ -223,6 +234,10 @@ mod tests {
                 added_at: 7,
                 queue_pos: 3,
                 ratio_limit_pct: Some(200),
+                name: "debian.iso".into(),
+                total: 100,
+                done: 60,
+                finished: false,
             },
         );
         store.save().unwrap();

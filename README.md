@@ -4,9 +4,9 @@ A torrent client for the Mac, written in Rust. It can be compiled for Windows an
 
 It exists because Transmission hides a torrent's details in a small popup and qBittorrent is awkward to install on Apple Silicon. RustTorrent keeps everything about a torrent in the main window, and aims to stay small and fast: one binary, no web engine.
 
-Status: **0.3, early**. The core works and has been tested on real downloads. Many planned features are not built yet; see the list below.
+Status: **0.4, early**. The core works and has been tested on real downloads. Many planned features are not built yet; see the list below.
 
-## What works in 0.3
+## What works in 0.4
 
 - Add torrents by magnet link, `.torrent` file, web address of a `.torrent` file, or bare info-hash.
 - Add by clicking a magnet link in a browser, opening a `.torrent` file from Finder, dropping a file on the window, or pasting into the add box.
@@ -22,11 +22,12 @@ Status: **0.3, early**. The core works and has been tested on real downloads. Ma
 - Categories and tags: give a torrent one category and any number of tags from the right-click menu, then filter the list by them in the sidebar.
 - Watch folder: `.torrent` files put in a chosen folder are added by themselves. A file that has been added is renamed to end in `.added`.
 - RSS and Atom feeds: each feed is read every 15 minutes, and every item whose title has all the "must have" words and none of the "must not have" words is downloaded once. A feed can give its torrents a category.
+- Network interface binding, for use with a VPN: choose one interface in Settings and all torrent traffic and feed reading goes through it. When that interface is not connected, the torrent engine is stopped, so nothing is sent or received until it is back; the window shows a red banner saying so.
 - Sortable table, search, and filters by status. The details show what a waiting torrent is waiting for.
 
 ## Size and speed
 
-Measured on an Apple Silicon Mac (size and memory with 0.3, download test with 0.1):
+Measured on an Apple Silicon Mac (size with 0.4, memory with 0.3, download test with 0.1):
 
 | | Measured | Target |
 | --- | --- | --- |
@@ -41,9 +42,8 @@ The app is 1 MB over its size target. Most of the size is the drawing library.
 
 In this order, as described in [the design document](docs/designs/rusttorrent.md):
 
-1. Binding to one network interface (for VPN use), blocking all traffic when it is down.
-2. Remote control from a browser or phone.
-3. Homebrew tap, app icon.
+1. Remote control from a browser or phone.
+2. Homebrew tap, app icon.
 
 There is no plugin support and none is planned.
 
@@ -97,6 +97,11 @@ cargo test --workspace
 - A category cannot have its own download folder yet.
 - The ratio limit was checked by automated tests only, not by seeding a real torrent up to a limit.
 - The app is signed only locally ("ad-hoc"), so a copy downloaded from the internet will be blocked by macOS until it is allowed in System Settings. Building it yourself avoids this.
+- Interface binding was tested with the Mac's normal interface and with an interface name that does not exist, not with a real VPN.
+- With an interface chosen, name lookups (DNS) still go through the system's resolver, which may not use that interface. Addresses of trackers and feeds can be looked up outside the VPN; the transfers themselves cannot.
+- If a VPN comes back under a different interface name (for example `utun5` instead of `utun4`), the app stays blocked until the new name is chosen in Settings.
+- While traffic is blocked, torrents cannot be removed and their file choice cannot be changed.
+- Interface binding works on the Mac and Linux. On Windows the interface list is empty.
 - Built and tested on Apple Silicon only.
 
 ## License

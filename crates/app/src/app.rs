@@ -14,7 +14,7 @@ fn color(state: State) -> Color32 {
         State::Queued | State::Scheduled => Color32::from_rgb(170, 140, 235),
         State::FetchingInfo | State::Checking => Color32::from_rgb(230, 170, 60),
         State::Completed => Color32::from_rgb(120, 200, 190),
-        State::Error => Color32::from_rgb(240, 90, 90),
+        State::Blocked | State::Error => Color32::from_rgb(240, 90, 90),
     }
 }
 
@@ -69,7 +69,7 @@ impl Filter {
             Filter::All => true,
             Filter::Downloading => matches!(state, State::Downloading | State::FetchingInfo | State::Checking),
             Filter::Seeding => state == State::Seeding,
-            Filter::Queued => matches!(state, State::Queued | State::Scheduled),
+            Filter::Queued => matches!(state, State::Queued | State::Scheduled | State::Blocked),
             Filter::Paused => state == State::Paused,
             Filter::Completed => state == State::Completed,
             Filter::Error => state == State::Error,
@@ -101,6 +101,8 @@ struct SettingsDialog {
     schedule: Schedule,
     watch_on: bool,
     watch_dir: Option<std::path::PathBuf>,
+    /// The one network interface to use, or `None` for any.
+    interface: Option<String>,
 }
 
 /// Asks for the name of a new category or tag for some torrents.
@@ -155,6 +157,7 @@ impl SettingsDialog {
             schedule: s.schedule,
             watch_on: s.watch_dir.is_some(),
             watch_dir: s.watch_dir.clone(),
+            interface: s.bind_interface.clone(),
         }
     }
 }
@@ -252,6 +255,7 @@ fn bar(ui: &mut egui::Ui, t: &TorrentView) {
         State::FetchingInfo => "Fetching info".to_owned(),
         State::Queued => format!("Queued  {:.0}%", t.progress() * 100.0),
         State::Scheduled => format!("Scheduled  {:.0}%", t.progress() * 100.0),
+        State::Blocked => format!("Blocked  {:.0}%", t.progress() * 100.0),
         _ => format!("{:.1}%", t.progress() * 100.0),
     };
     ui.add(
@@ -433,6 +437,9 @@ impl App {
                         clock_text(s.schedule.start_min)
                     );
                     ui.label(RichText::new(text).small().color(color(State::Scheduled)));
+                }
+                if let (Some(name), None) = (&s.bind_interface, &self.snap.blocked) {
+                    ui.label(RichText::new(format!("via {name}")).small().weak());
                 }
             });
         });
@@ -1179,6 +1186,42 @@ impl App {
                     );
                 });
                 ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.label("Network interface");
+                    let label = |name: &str| match snap.interfaces.iter().find(|i| i.name == name) {
+                        Some(i) => format!("{name}  ({})", i.addrs.join(", ")),
+                        None => format!("{name}  (not connected)"),
+                    };
+                    let shown = match &dialog.interface {
+                        Some(name) => label(name),
+                        None => "Any".to_owned(),
+                    };
+                    egui::ComboBox::from_id_salt("interface")
+                        .selected_text(shown)
+                        .width(260.0)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut dialog.interface, None, "Any");
+                            let mut names: Vec<String> = snap.interfaces.iter().map(|i| i.name.clone()).collect();
+                            if let Some(chosen) = &snap.settings.bind_interface {
+                                if !names.contains(chosen) {
+                                    names.push(chosen.clone());
+                                }
+                            }
+                            for name in names {
+                                let text = label(&name);
+                                ui.selectable_value(&mut dialog.interface, Some(name), text);
+                            }
+                        });
+                });
+                ui.label(
+                    RichText::new(
+                        "For a VPN: choose its interface and nothing is sent or received any other way. \
+                         While that interface is not connected, all traffic is blocked.",
+                    )
+                    .small()
+                    .weak(),
+                );
+                ui.add_space(8.0);
                 ui.label(
                     RichText::new(format!("RustTorrent {}", rusttorrent_core::VERSION))
                         .small()
@@ -1211,6 +1254,9 @@ impl App {
                 let watch = dialog.watch_dir.clone().filter(|_| dialog.watch_on);
                 if watch != snap.settings.watch_dir {
                     core.send(Command::SetWatchDir(watch));
+                }
+                if dialog.interface != snap.settings.bind_interface {
+                    core.send(Command::SetInterface(dialog.interface.clone()));
                 }
                 close = true;
             }
@@ -1529,6 +1575,18 @@ impl eframe::App for App {
         }
 
         egui::Panel::top("bar").show(ui, |ui| self.top_bar(ui));
+        if let Some(why) = self.snap.blocked.clone().filter(|_| self.snap.ready) {
+            egui::Panel::top("blocked").show(ui, |ui| {
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(why).strong().color(color(State::Blocked)));
+                    if ui.button("Settings…").clicked() {
+                        self.settings = Some(SettingsDialog::of(&self.snap.settings));
+                    }
+                });
+                ui.add_space(4.0);
+            });
+        }
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
         egui::Panel::left("side")
             .resizable(false)
