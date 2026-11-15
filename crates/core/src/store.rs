@@ -1,0 +1,211 @@
+//! The app's own saved state: settings and one record per torrent, keyed by info-hash.
+//!
+//! The engine keeps what it needs to resume downloads. Everything the engine does not
+//! know about (what the user asked for, categories, lifetime upload totals) lives here,
+//! in one JSON file with a version number, written so a crash cannot leave half a file.
+use std::collections::BTreeMap;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
+use anyhow::{bail, Context};
+use serde::{Deserialize, Serialize};
+
+use crate::arbiter::Intent;
+
+pub const SCHEMA_VERSION: u32 = 1;
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(default)]
+pub struct Settings {
+    pub download_dir: PathBuf,
+    /// Download limit in KiB/s. 0 means no limit.
+    pub down_limit_kib: u32,
+    /// Upload limit in KiB/s. 0 means no limit.
+    pub up_limit_kib: u32,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        let download_dir = dirs::download_dir()
+            .or_else(|| dirs::home_dir().map(|h| h.join("Downloads")))
+            .unwrap_or_else(|| PathBuf::from("."));
+        Self {
+            download_dir,
+            down_limit_kib: 0,
+            up_limit_kib: 0,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+#[serde(default)]
+pub struct Record {
+    pub intent: Intent,
+    pub category: Option<String>,
+    /// Bytes uploaded over the torrent's whole life, across restarts.
+    pub uploaded: u64,
+    /// Seconds since 1970.
+    pub added_at: u64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(default)]
+pub struct Data {
+    pub schema_version: u32,
+    pub settings: Settings,
+    pub torrents: BTreeMap<String, Record>,
+    /// Links that were added but whose details had not arrived when the app last quit.
+    pub pending: Vec<String>,
+}
+
+impl Default for Data {
+    fn default() -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION,
+            settings: Settings::default(),
+            torrents: BTreeMap::new(),
+            pending: Vec::new(),
+        }
+    }
+}
+
+pub struct Store {
+    path: PathBuf,
+    pub data: Data,
+}
+
+impl Store {
+    /// Loads the file, or starts empty if there is none.
+    ///
+    /// A file that cannot be read is moved aside (never deleted) and the returned note
+    /// says where. A file written by a newer version of the app is an error: this
+    /// version must not overwrite it.
+    pub fn load(path: &Path) -> anyhow::Result<(Self, Option<String>)> {
+        let fresh = |note| {
+            Ok((
+                Self {
+                    path: path.to_owned(),
+                    data: Data::default(),
+                },
+                note,
+            ))
+        };
+        let text = match std::fs::read_to_string(path) {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return fresh(None),
+            Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+        };
+        match serde_json::from_str::<Data>(&text) {
+            Ok(data) if data.schema_version > SCHEMA_VERSION => bail!(
+                "{} was written by a newer version of RustTorrent (format {}, this version reads up to {}). \
+                 Update the app, or move that file away to start fresh.",
+                path.display(),
+                data.schema_version,
+                SCHEMA_VERSION
+            ),
+            Ok(data) => Ok((
+                Self {
+                    path: path.to_owned(),
+                    data,
+                },
+                None,
+            )),
+            Err(e) => {
+                let aside = path.with_extension(format!("unreadable-{}.json", crate::now_secs()));
+                std::fs::rename(path, &aside).with_context(|| format!("moving unreadable {} aside", path.display()))?;
+                fresh(Some(format!(
+                    "Saved settings could not be read ({e}). They were moved to {} and the app started with defaults.",
+                    aside.display()
+                )))
+            }
+        }
+    }
+
+    /// Writes to a temporary file, flushes it to disk, then renames it over the old one.
+    pub fn save(&self) -> anyhow::Result<()> {
+        let tmp = self.path.with_extension("json.tmp");
+        if let Some(dir) = self.path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let mut f = std::fs::File::create(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
+        f.write_all(&serde_json::to_vec_pretty(&self.data)?)?;
+        f.sync_all()?;
+        drop(f);
+        std::fs::rename(&tmp, &self.path).with_context(|| format!("replacing {}", self.path.display()))?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("rusttorrent-store-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("state.json")
+    }
+
+    #[test]
+    fn missing_file_gives_defaults() {
+        let (store, note) = Store::load(&temp("missing")).unwrap();
+        assert!(note.is_none());
+        assert_eq!(store.data, Data::default());
+    }
+
+    #[test]
+    fn round_trip() {
+        let path = temp("roundtrip");
+        let (mut store, _) = Store::load(&path).unwrap();
+        store.data.settings.down_limit_kib = 512;
+        store.data.pending.push("magnet:?xt=urn:btih:abc".into());
+        store.data.torrents.insert(
+            "00112233".into(),
+            Record {
+                intent: Intent::Pause,
+                category: Some("Linux".into()),
+                uploaded: 42,
+                added_at: 7,
+            },
+        );
+        store.save().unwrap();
+        let (again, note) = Store::load(&path).unwrap();
+        assert!(note.is_none());
+        assert_eq!(again.data, store.data);
+        assert!(!path.with_extension("json.tmp").exists());
+    }
+
+    #[test]
+    fn unreadable_file_is_moved_aside_not_deleted() {
+        let path = temp("corrupt");
+        std::fs::write(&path, "{ not json").unwrap();
+        let (store, note) = Store::load(&path).unwrap();
+        assert!(note.is_some());
+        assert_eq!(store.data, Data::default());
+        assert!(!path.exists());
+        let kept = std::fs::read_dir(path.parent().unwrap()).unwrap().count();
+        assert_eq!(kept, 1, "the unreadable file is kept under another name");
+    }
+
+    #[test]
+    fn newer_format_is_refused() {
+        let path = temp("newer");
+        std::fs::write(&path, format!("{{\"schema_version\": {}}}", SCHEMA_VERSION + 1)).unwrap();
+        assert!(Store::load(&path).is_err());
+        assert!(path.exists(), "the newer file is left untouched");
+    }
+
+    #[test]
+    fn unknown_and_missing_fields_are_tolerated() {
+        let path = temp("fields");
+        std::fs::write(
+            &path,
+            r#"{"schema_version":1,"future_field":true,"torrents":{"aa":{}}}"#,
+        )
+        .unwrap();
+        let (store, note) = Store::load(&path).unwrap();
+        assert!(note.is_none());
+        assert_eq!(store.data.torrents["aa"], Record::default());
+    }
+}

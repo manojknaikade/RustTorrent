@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = ["crates/core", "crates/app"]
+exclude = ["spikes"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+# Speed first, then size. Panics unwind (no `panic = "abort"`) so one failing task
+# cannot take the whole app down.
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
