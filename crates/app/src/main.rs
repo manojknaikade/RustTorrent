@@ -2,6 +2,7 @@
 //! latest snapshot and sends commands.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod add_dialog;
 mod app;
 #[cfg(target_os = "macos")]
 mod mac;
@@ -18,6 +19,14 @@ static CTX: OnceLock<egui::Context> = OnceLock::new();
 
 pub(crate) fn deliver(text: String) {
     INBOX.lock().unwrap_or_else(|e| e.into_inner()).push(text);
+    if let Some(ctx) = CTX.get() {
+        ctx.request_repaint();
+    }
+}
+
+/// Asks the window to draw again soon.
+#[cfg(target_os = "macos")]
+pub(crate) fn wake() {
     if let Some(ctx) = CTX.get() {
         ctx.request_repaint();
     }

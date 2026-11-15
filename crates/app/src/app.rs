@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use eframe::egui::{self, Color32, RichText, Sense};
 use egui_extras::{Column, TableBuilder};
-use rusttorrent_core::{format, Command, Core, Feed, HoldReason, Move, Schedule, Snapshot, State, TorrentView};
+use rusttorrent_core::{format, manage, Command, Core, Feed, HoldReason, Move, Schedule, Snapshot, State, TorrentView};
 
 fn color(state: State) -> Color32 {
     match state {
@@ -111,6 +111,7 @@ struct SettingsDialog {
     /// The app macOS opens magnet links with, by its bundle identifier. Mac only.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     magnet_handler: Option<String>,
+    ask_before_add: bool,
 }
 
 /// Asks for the name of a new category or tag for some torrents.
@@ -174,6 +175,7 @@ impl SettingsDialog {
             magnet_handler: crate::mac::magnet_handler(),
             #[cfg(not(target_os = "macos"))]
             magnet_handler: None,
+            ask_before_add: s.ask_before_add,
         }
     }
 }
@@ -235,6 +237,12 @@ pub struct App {
     settings: Option<SettingsDialog>,
     name: Option<NameDialog>,
     feeds: Option<FeedsDialog>,
+    /// Torrents waiting in the add dialog.
+    adding: crate::add_dialog::AddQueue,
+    /// Asking whether to quit while downloads are running.
+    quit: bool,
+    /// The user agreed to quit.
+    quit_ok: bool,
 }
 
 fn ratio_of(t: &TorrentView) -> f64 {
@@ -304,7 +312,29 @@ impl App {
             settings: None,
             name: None,
             feeds: None,
+            adding: Default::default(),
+            quit: false,
+            quit_ok: false,
         }
+    }
+
+    /// Adds these, through the add dialog unless the settings say not to ask.
+    fn add_texts(&mut self, texts: Vec<String>) {
+        for text in texts {
+            if self.snap.settings.ask_before_add {
+                self.adding.push(text);
+            } else {
+                self.core.send(Command::Add(text));
+            }
+        }
+    }
+
+    /// Something is downloading right now, so quitting would interrupt it.
+    fn busy(&self) -> bool {
+        self.snap
+            .torrents
+            .iter()
+            .any(|t| matches!(t.state, State::Downloading | State::FetchingInfo | State::Checking))
     }
 
     fn rebuild(&mut self) {
@@ -942,6 +972,43 @@ impl App {
                                 ui.close();
                             }
                         });
+                        let mut forced = t.force_start;
+                        if ui
+                            .add_enabled(!t.is_pending(), egui::Checkbox::new(&mut forced, "Force start"))
+                            .on_hover_text(
+                                "Download even when the queue is full. The schedule and the network \
+                                 interface still apply.",
+                            )
+                            .clicked()
+                        {
+                            action = Some((
+                                Command::SetForceStart {
+                                    keys: key.clone(),
+                                    on: forced,
+                                },
+                                false,
+                            ));
+                            ui.close();
+                        }
+                        ui.add_enabled_ui(!t.is_pending(), |ui| {
+                            ui.menu_button("Copy", |ui| {
+                                let chosen = || all.iter().filter(|t| key.contains(&t.key) && !t.is_pending());
+                                let mut copied: Option<String> = None;
+                                if ui.button("Magnet link").clicked() {
+                                    copied = Some(chosen().map(manage::magnet_link).collect::<Vec<_>>().join("\n"));
+                                }
+                                if ui.button("Info-hash").clicked() {
+                                    copied = Some(chosen().map(|t| t.key.clone()).collect::<Vec<_>>().join("\n"));
+                                }
+                                if ui.button("Name").clicked() {
+                                    copied = Some(chosen().map(|t| t.name.clone()).collect::<Vec<_>>().join("\n"));
+                                }
+                                if let Some(text) = copied {
+                                    ui.ctx().copy_text(text);
+                                    ui.close();
+                                }
+                            });
+                        });
                         ui.separator();
                         if ui.button("Remove…").clicked() {
                             action = Some((
@@ -1001,9 +1068,9 @@ impl App {
     }
 
     fn dialogs(&mut self, ctx: &egui::Context) {
+        let mut texts: Vec<String> = Vec::new();
         if let Some(text) = &mut self.add {
             let (mut close, mut submit) = (false, false);
-            let core = &self.core;
             let response = egui::Modal::new(egui::Id::unique("add")).show(ctx, |ui| {
                 ui.set_width(480.0);
                 ui.heading("Add torrent");
@@ -1025,7 +1092,7 @@ impl App {
                             .pick_files();
                         if let Some(files) = picked {
                             for f in files {
-                                core.send(Command::Add(f.to_string_lossy().into_owned()));
+                                texts.push(f.to_string_lossy().into_owned());
                             }
                             submit = true;
                         }
@@ -1046,12 +1113,43 @@ impl App {
             });
             if submit {
                 for line in text.lines().filter(|l| !l.trim().is_empty()) {
-                    core.send(Command::Add(line.to_owned()));
+                    texts.push(line.to_owned());
                 }
                 close = true;
             }
             if close || response.should_close() {
                 self.add = None;
+            }
+        }
+        self.add_texts(texts);
+        if self.add.is_none() && self.remove.is_none() && self.settings.is_none() {
+            let categories = names_in_use(&self.snap).0;
+            self.adding.show(ctx, &self.core, &self.snap, &categories);
+        }
+
+        if self.quit {
+            let (mut close, mut quit) = (false, false);
+            let response = egui::Modal::new(egui::Id::unique("quit")).show(ctx, |ui| {
+                ui.set_width(380.0);
+                ui.heading("Quit RustTorrent?");
+                ui.add_space(4.0);
+                ui.label("Some torrents are still downloading. They will go on from where they stopped the next time the app opens.");
+                ui.add_space(8.0);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button(RichText::new("Quit").strong()).clicked() {
+                        quit = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        close = true;
+                    }
+                });
+            });
+            if quit {
+                self.quit_ok = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            if quit || close || response.should_close() {
+                self.quit = false;
             }
         }
 
@@ -1119,6 +1217,64 @@ impl App {
                     }
                     ui.add(egui::Label::new(snap.settings.download_dir.display().to_string()).truncate());
                 });
+                ui.checkbox(
+                    &mut dialog.ask_before_add,
+                    "Ask where to save and which files to download when adding",
+                )
+                .on_hover_text("Torrents from the watch folder, feeds and the remote page are added without asking.");
+                egui::CollapsingHeader::new("Folder per category")
+                    .id_salt("category-dirs")
+                    .show(ui, |ui| {
+                        let mut names = names_in_use(snap).0;
+                        for name in snap.settings.category_dirs.keys() {
+                            if !names.contains(name) {
+                                names.push(name.clone());
+                            }
+                        }
+                        if names.is_empty() {
+                            ui.label(RichText::new("No categories yet.").weak());
+                        }
+                        egui::Grid::new("category-dirs-grid")
+                            .num_columns(3)
+                            .spacing([12.0, 4.0])
+                            .show(ui, |ui| {
+                                for name in names {
+                                    let dir = snap.settings.category_dirs.get(&name);
+                                    ui.label(&name);
+                                    let text = match dir {
+                                        Some(dir) => RichText::new(dir.display().to_string()),
+                                        None => RichText::new("The folder above").weak(),
+                                    };
+                                    ui.add(egui::Label::new(text).truncate());
+                                    ui.horizontal(|ui| {
+                                        if ui.button("Change…").clicked() {
+                                            let start = dir.unwrap_or(&snap.settings.download_dir);
+                                            if let Some(dir) = rfd::FileDialog::new().set_directory(start).pick_folder()
+                                            {
+                                                core.send(Command::SetCategoryDir {
+                                                    category: name.clone(),
+                                                    dir: Some(dir),
+                                                });
+                                            }
+                                        }
+                                        if dir.is_some() && ui.button("Clear").clicked() {
+                                            core.send(Command::SetCategoryDir {
+                                                category: name.clone(),
+                                                dir: None,
+                                            });
+                                        }
+                                    });
+                                    ui.end_row();
+                                }
+                            });
+                        ui.label(
+                            RichText::new(
+                                "Used when a torrent is added. Torrents already in the list stay where they are.",
+                            )
+                            .small()
+                            .weak(),
+                        );
+                    });
                 ui.add_space(8.0);
                 ui.label(RichText::new("Speed limits in KiB/s. 0 means no limit.").weak());
                 egui::Grid::new("limits")
@@ -1377,6 +1533,9 @@ impl App {
                         password,
                     });
                 }
+                if dialog.ask_before_add != snap.settings.ask_before_add {
+                    core.send(Command::SetAskBeforeAdd(dialog.ask_before_add));
+                }
                 close = true;
             }
             if close || response.should_close() {
@@ -1622,17 +1781,35 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
 
-        for text in crate::take_inbox() {
-            self.core.send(Command::Add(text));
-        }
-        for file in ctx.input(|i| i.raw.dropped_files.clone()) {
-            self.core.send(Command::Add(file.path().to_string_lossy().into_owned()));
-        }
-
         let snap = self.core.snapshot();
         if !Arc::ptr_eq(&snap, &self.snap) {
             self.snap = snap;
             self.dirty = true;
+        }
+
+        // Wait for the saved settings, which say whether to ask before adding.
+        if self.snap.ready || self.snap.fatal.is_some() {
+            let mut texts = crate::take_inbox();
+            texts.extend(
+                ctx.input(|i| i.raw.dropped_files.clone())
+                    .iter()
+                    .map(|f| f.path().to_string_lossy().into_owned()),
+            );
+            self.add_texts(texts);
+        }
+
+        // Ask before quitting while something downloads.
+        let busy = self.busy();
+        #[cfg(target_os = "macos")]
+        {
+            crate::mac::ASK_BEFORE_QUIT.store(busy && !self.quit_ok, std::sync::atomic::Ordering::Relaxed);
+            if crate::mac::QUIT_ASKED.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                self.quit = true;
+            }
+        }
+        if ctx.input(|i| i.viewport().close_requested()) && busy && !self.quit_ok {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.quit = true;
         }
         if let Some(fatal) = self.snap.fatal.clone() {
             egui::CentralPanel::default().show(ui, |ui| {
@@ -1657,10 +1834,16 @@ impl eframe::App for App {
                 use std::sync::atomic::{AtomicBool, Ordering};
                 static OPENED: AtomicBool = AtomicBool::new(false);
                 let wanted = std::env::var("RUSTTORRENT_SHOT_TAB").unwrap_or_default();
-                let known = wanted == "feeds" || wanted == "settings";
+                let known = ["feeds", "settings", "add", "quit"].contains(&wanted.as_str());
                 if known && self.snap.ready && !OPENED.swap(true, Ordering::Relaxed) {
                     if wanted == "feeds" {
                         self.feeds = Some(FeedsDialog::of(&self.snap));
+                    } else if wanted == "add" {
+                        // RUSTTORRENT_SHOT_ADD holds the link or file to show in the add dialog.
+                        let text = std::env::var("RUSTTORRENT_SHOT_ADD").unwrap_or_default();
+                        self.adding.push(text);
+                    } else if wanted == "quit" {
+                        self.quit = true;
                     } else {
                         self.settings = Some(SettingsDialog::of(&self.snap.settings));
                     }
@@ -1687,7 +1870,9 @@ impl eframe::App for App {
             && self.remove.is_none()
             && self.settings.is_none()
             && self.name.is_none()
-            && self.feeds.is_none();
+            && self.feeds.is_none()
+            && !self.adding.is_open()
+            && !self.quit;
         if !typing
             && no_dialog
             && ctx.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace))

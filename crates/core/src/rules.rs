@@ -77,6 +77,8 @@ pub struct Item {
     pub added_at: u64,
     /// This torrent's own ratio limit in percent, if it has one. 0 means no limit.
     pub ratio_limit_pct: Option<u32>,
+    /// Never held by the queue and does not use a slot. The schedule still holds it.
+    pub force_start: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -127,6 +129,10 @@ pub fn apply(items: &[Item], settings: &Settings, now: Clock) -> Vec<Outcome> {
         let t = &items[i];
         // A paused torrent keeps its place but does not use a slot.
         if t.intent != Intent::Run || !t.settled {
+            continue;
+        }
+        // Forced torrents keep their place too, and download beside the queue.
+        if t.force_start {
             continue;
         }
         if free > 0 {
@@ -195,6 +201,7 @@ mod tests {
             queue_pos: pos,
             added_at: 0,
             ratio_limit_pct: None,
+            force_start: false,
         }
     }
 
@@ -403,5 +410,71 @@ mod tests {
         done.finished = true;
         let items = [item("a", 1), done, item("c", 3)];
         assert_eq!(reorder(&items, &keys(&["c"]), Move::Up), keys(&["c", "a"]));
+    }
+
+    #[test]
+    fn force_start_skips_the_queue_and_uses_no_slot() {
+        let mut forced = item("c", 3);
+        forced.force_start = true;
+        let items = [item("a", 1), item("b", 2), forced, item("d", 4)];
+        // One slot: "a" takes it, "c" downloads anyway, "b" and "d" wait.
+        assert_eq!(queued(&items, 1), [false, true, false, true]);
+        let out = apply(
+            &items,
+            &Settings {
+                max_downloads: 1,
+                ..Default::default()
+            },
+            NOON,
+        );
+        assert_eq!(out[2].queue_pos, Some(3), "it keeps its place in the queue");
+        let decisions: Vec<_> = items
+            .iter()
+            .zip(&out)
+            .map(|(t, o)| crate::arbiter::decide(t.intent, o.holds))
+            .collect();
+        assert_eq!(decisions[2], crate::arbiter::Decision::Run);
+    }
+
+    #[test]
+    fn force_start_still_obeys_the_schedule_and_pause() {
+        let settings = Settings {
+            max_downloads: 1,
+            schedule: Schedule {
+                enabled: true,
+                start_min: 60,
+                end_min: 120,
+                days: 0x7f,
+            },
+            ..Default::default()
+        };
+        let mut forced = item("a", 1);
+        forced.force_start = true;
+        let out = apply(std::slice::from_ref(&forced), &settings, NOON);
+        assert!(out[0].holds.schedule, "outside the window it is held");
+        assert!(!out[0].holds.queue);
+        assert_ne!(
+            crate::arbiter::decide(forced.intent, out[0].holds),
+            crate::arbiter::Decision::Run
+        );
+        forced.intent = Intent::Pause;
+        let out = apply(std::slice::from_ref(&forced), &settings, at(0, 1, 30));
+        assert_eq!(
+            crate::arbiter::decide(forced.intent, out[0].holds),
+            crate::arbiter::Decision::Paused,
+            "a paused torrent stays paused"
+        );
+    }
+
+    #[test]
+    fn force_start_still_obeys_the_network_block() {
+        let mut forced = item("a", 1);
+        forced.force_start = true;
+        let mut holds = apply(std::slice::from_ref(&forced), &Settings::default(), NOON)[0].holds;
+        holds.network = true;
+        assert_eq!(
+            crate::arbiter::decide(forced.intent, holds),
+            crate::arbiter::Decision::Held(crate::arbiter::HoldReason::Network)
+        );
     }
 }

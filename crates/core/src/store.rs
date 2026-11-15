@@ -35,6 +35,11 @@ pub struct Settings {
     /// all while it is not connected. `None` uses whatever connection the system has.
     pub bind_interface: Option<String>,
     pub remote: RemoteSettings,
+    /// Show the add dialog (folder, category, files) before a torrent added from the
+    /// window starts. Watch folder, feeds and the remote page never ask.
+    pub ask_before_add: bool,
+    /// The folder each category saves to, by category name. Others use `download_dir`.
+    pub category_dirs: BTreeMap<String, PathBuf>,
 }
 
 /// Remote control from a browser. Off until the user turns it on and sets a password.
@@ -84,6 +89,8 @@ impl Default for Settings {
             watch_dir: None,
             bind_interface: None,
             remote: RemoteSettings::default(),
+            ask_before_add: true,
+            category_dirs: BTreeMap::new(),
         }
     }
 }
@@ -111,6 +118,9 @@ pub struct Record {
     pub total: u64,
     pub done: u64,
     pub finished: bool,
+    /// Downloads even when the queue is full. The schedule and the network interface
+    /// still apply.
+    pub force_start: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
@@ -245,6 +255,12 @@ mod tests {
         store.data.pending.push("magnet:?xt=urn:btih:abc".into());
         store.data.settings.watch_dir = Some(PathBuf::from("/tmp/watch"));
         store.data.settings.bind_interface = Some("utun4".into());
+        store.data.settings.ask_before_add = false;
+        store
+            .data
+            .settings
+            .category_dirs
+            .insert("Linux".into(), PathBuf::from("/tmp/linux"));
         store.data.feeds.push(Feed {
             url: "https://example.org/feed".into(),
             include: "debian".into(),
@@ -272,6 +288,7 @@ mod tests {
                 total: 100,
                 done: 60,
                 finished: false,
+                force_start: true,
             },
         );
         store.save().unwrap();
@@ -312,5 +329,6 @@ mod tests {
         let (store, note) = Store::load(&path).unwrap();
         assert!(note.is_none());
         assert_eq!(store.data.torrents["aa"], Record::default());
+        assert!(store.data.settings.ask_before_add, "files from before 0.7 still ask");
     }
 }

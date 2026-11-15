@@ -93,6 +93,8 @@ pub struct TorrentView {
     pub trackers: Arc<Vec<String>>,
     /// Filled only for the torrent the front end is showing details for.
     pub peers: Vec<PeerView>,
+    /// Downloads even when the queue is full.
+    pub force_start: bool,
 }
 
 impl TorrentView {
@@ -148,4 +150,6 @@ pub struct Snapshot {
     pub remote_on: bool,
     /// Why the remote-control page could not be served.
     pub remote_error: Option<String>,
+    /// Torrents the add dialog asked about, with their files once known.
+    pub inspected: Vec<crate::manage::Inspection>,
 }

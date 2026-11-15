@@ -7,12 +7,30 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, Imp, Sel};
 use objc2::{class, define_class, msg_send, sel, AllocAnyThread};
 use objc2_foundation::{NSArray, NSNotification, NSObject, NSString, NSURL};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 extern "C-unwind" fn open_urls(_this: &AnyObject, _sel: Sel, _app: &AnyObject, urls: &NSArray<NSURL>) {
     for url in urls.iter() {
         if let Some(s) = url.absoluteString() {
             crate::deliver(s.to_string());
         }
+    }
+}
+
+/// Set by the window while quitting would interrupt a download.
+pub static ASK_BEFORE_QUIT: AtomicBool = AtomicBool::new(false);
+/// Set when the user chose Quit from the menu (or pressed Cmd-Q) and was not let go yet.
+pub static QUIT_ASKED: AtomicBool = AtomicBool::new(false);
+
+/// `applicationShouldTerminate:`. Quit from the menu ends the app without closing the window
+/// first, so the window's own question would never be asked. Returns 0 (cancel) or 1 (now).
+extern "C-unwind" fn should_terminate(_this: &AnyObject, _sel: Sel, _app: &AnyObject) -> usize {
+    if ASK_BEFORE_QUIT.load(Ordering::Relaxed) {
+        QUIT_ASKED.store(true, Ordering::Relaxed);
+        crate::wake();
+        0
+    } else {
+        1
     }
 }
 
@@ -58,6 +76,16 @@ define_class!(
                     objc2::ffi::class_addMethod(cls as *mut AnyClass, sel!(application:openURLs:), imp, c"v@:@@".as_ptr());
                 if !added.as_bool() {
                     eprintln!("rusttorrent: could not add application:openURLs:; opened files will not arrive");
+                }
+                let imp: Imp = std::mem::transmute(should_terminate as extern "C-unwind" fn(&AnyObject, Sel, &AnyObject) -> usize);
+                let added = objc2::ffi::class_addMethod(
+                    cls as *mut AnyClass,
+                    sel!(applicationShouldTerminate:),
+                    imp,
+                    c"Q@:@".as_ptr(),
+                );
+                if !added.as_bool() {
+                    eprintln!("rusttorrent: could not add applicationShouldTerminate:; quitting will not ask first");
                 }
             }
         }

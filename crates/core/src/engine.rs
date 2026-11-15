@@ -28,6 +28,7 @@ use chrono::{Datelike, Timelike};
 use crate::arbiter::{decide, Decision, HoldReason, Intent};
 use crate::feeds::{self, Feed};
 use crate::intake::{self, Source};
+use crate::manage::{self, AddOptions, Inspector, Prepared};
 use crate::model::{FeedView, FileMeta, Notice, PeerView, Snapshot, State, TorrentView};
 use crate::net::{self, Interface};
 use crate::rules::{self, Clock, Move, Schedule};
@@ -101,6 +102,23 @@ pub enum Command {
     CheckFeeds,
     /// The torrent whose peers the front end wants to see.
     Watch(Option<String>),
+    /// Fetch the name and files of these torrents for the add dialog, and stop fetching
+    /// any others. An empty list stops it all.
+    Inspect(Vec<String>),
+    /// Add with the choices made in the add dialog.
+    AddWith(AddOptions),
+    /// Let these torrents download even when the queue is full, or not.
+    SetForceStart {
+        keys: Vec<String>,
+        on: bool,
+    },
+    /// The folder a category saves to, or `None` for the download folder.
+    SetCategoryDir {
+        category: String,
+        dir: Option<PathBuf>,
+    },
+    /// Whether adding from the window shows the add dialog first.
+    SetAskBeforeAdd(bool),
     Shutdown,
 }
 
@@ -126,6 +144,10 @@ struct Pending {
     category: Option<String>,
     /// The work of adding it. `None` while there is no engine to add it to.
     task: Option<tokio::task::JoinHandle<()>>,
+    /// Choices from the add dialog. See [`AddOptions`].
+    folder: Option<PathBuf>,
+    paused: bool,
+    files: Option<Vec<usize>>,
 }
 
 struct FeedDone {
@@ -185,6 +207,8 @@ struct Worker {
     remote_task: Option<tokio::task::JoinHandle<()>>,
     remote_error: Option<String>,
     remote_try: Option<Instant>,
+    /// Name and file lists fetched for the add dialog.
+    inspector: Inspector,
 }
 
 pub(crate) fn run(
@@ -257,6 +281,7 @@ async fn main_loop(
         remote_task: None,
         remote_error: None,
         remote_try: None,
+        inspector: Inspector::default(),
     };
     if let Some(note) = note {
         w.notice(note, true);
@@ -359,39 +384,60 @@ impl Worker {
     }
 
     fn add(&mut self, text: String, category: Option<String>) {
+        self.add_with(AddOptions {
+            text,
+            category,
+            ..Default::default()
+        });
+    }
+
+    fn add_with(&mut self, options: AddOptions) {
+        let AddOptions {
+            text,
+            folder,
+            category,
+            paused,
+            files,
+        } = options;
         let source = match intake::parse(&text) {
             Ok(s) => s,
             Err(e) => return self.notice(e, true),
         };
         let text = text.trim().to_owned();
+        let prepared = self.inspector.take(&text);
         if self.pending.iter().any(|p| p.text == text) {
             return;
         }
         let label = intake::label(&source);
         let id = self.next_pending;
         self.next_pending += 1;
-        let task = self.start_add(id, &text, &label);
-        self.pending.push(Pending {
+        let mut pending = Pending {
             id,
             text: text.clone(),
             label,
             added_at: now_secs(),
             category,
-            task,
-        });
+            task: None,
+            folder,
+            paused,
+            files,
+        };
+        pending.task = self.start_add(&pending, prepared);
+        self.pending.push(pending);
         self.store.data.pending.push(text);
         self.save();
     }
 
     /// Starts the work of adding a link or file to the engine, if there is an engine.
-    fn start_add(&self, id: u64, text: &str, label: &str) -> Option<tokio::task::JoinHandle<()>> {
+    fn start_add(&self, p: &Pending, prepared: Option<Prepared>) -> Option<tokio::task::JoinHandle<()>> {
         let session = self.session.clone()?;
-        let source = intake::parse(text).ok()?;
+        let source = intake::parse(&p.text).ok()?;
         let tx = self.add_tx.clone();
-        let folder = self.store.data.settings.download_dir.to_string_lossy().into_owned();
-        let (text, label) = (text.to_owned(), label.to_owned());
+        let folder = manage::folder_for(&self.store.data.settings, p.folder.as_ref(), p.category.as_deref());
+        let options = manage::engine_options(&folder, p.paused, p.files.clone());
+        let (id, text, label) = (p.id, p.text.clone(), p.label.clone());
         Some(tokio::spawn(async move {
-            let result = add_to_engine(&session, source, folder).await;
+            let result = add_to_engine(&session, source, options, prepared).await;
             let _ = tx.send(AddDone {
                 id,
                 text,
@@ -409,6 +455,7 @@ impl Worker {
                 task.abort();
             }
         }
+        self.inspector.stop();
         if let Some(session) = self.session.take() {
             session.stop().await;
         }
@@ -447,8 +494,7 @@ impl Worker {
         self.bound_index = index;
         for i in 0..self.pending.len() {
             if self.pending[i].task.is_none() {
-                let p = &self.pending[i];
-                let task = self.start_add(p.id, &p.text, &p.label);
+                let task = self.start_add(&self.pending[i], None);
                 self.pending[i].task = task;
             }
         }
@@ -507,7 +553,7 @@ impl Worker {
 
     /// The list as it was last seen, for when there is no engine to ask.
     fn blocked_views(&self) -> Vec<TorrentView> {
-        let folder = self.store.data.settings.download_dir.to_string_lossy().into_owned();
+        let settings = &self.store.data.settings;
         self.store
             .data
             .torrents
@@ -534,7 +580,9 @@ impl Worker {
                 peers_seen: 0,
                 category: record.category.clone(),
                 tags: record.tags.clone(),
-                save_path: folder.clone(),
+                save_path: manage::folder_for(settings, None, record.category.as_deref())
+                    .to_string_lossy()
+                    .into_owned(),
                 added_at: record.added_at,
                 held: None,
                 queue_pos: None,
@@ -544,14 +592,18 @@ impl Worker {
                 selected: None,
                 trackers: self.meta.get(key).map(|m| m.trackers.clone()).unwrap_or_default(),
                 peers: Vec::new(),
+                force_start: record.force_start,
             })
             .collect()
     }
 
     fn added(&mut self, done: AddDone) {
-        let category = match self.pending.iter().position(|p| p.id == done.id) {
-            Some(i) => self.pending.remove(i).category,
-            None => None,
+        let (category, paused) = match self.pending.iter().position(|p| p.id == done.id) {
+            Some(i) => {
+                let p = self.pending.remove(i);
+                (p.category, p.paused)
+            }
+            None => (None, false),
         };
         self.store.data.pending.retain(|t| *t != done.text);
         match done.result {
@@ -560,7 +612,7 @@ impl Worker {
                 self.store.data.torrents.insert(
                     key,
                     Record {
-                        intent: Intent::Run,
+                        intent: if paused { Intent::Pause } else { Intent::Run },
                         added_at: now_secs(),
                         queue_pos,
                         category,
@@ -599,6 +651,7 @@ impl Worker {
             queue_pos: record.queue_pos,
             added_at: record.added_at,
             ratio_limit_pct: record.ratio_limit_pct,
+            force_start: record.force_start,
         }
     }
 
@@ -849,6 +902,28 @@ impl Worker {
                 }
             }
             Command::Watch(key) => self.watched = key,
+            Command::Inspect(texts) => self.inspector.want(texts, self.session.as_ref()),
+            Command::AddWith(options) => self.add_with(options),
+            Command::SetForceStart { keys, on } => {
+                for key in &keys {
+                    if let Some(record) = self.store.data.torrents.get_mut(key) {
+                        record.force_start = on;
+                    }
+                }
+                self.save();
+            }
+            Command::SetCategoryDir { category, dir } => {
+                let dirs = &mut self.store.data.settings.category_dirs;
+                match dir {
+                    Some(dir) => dirs.insert(category, dir),
+                    None => dirs.remove(&category),
+                };
+                self.save();
+            }
+            Command::SetAskBeforeAdd(on) => {
+                self.store.data.settings.ask_before_add = on;
+                self.save();
+            }
             Command::Shutdown => {}
         }
     }
@@ -1153,6 +1228,7 @@ impl Worker {
                     selected: handle.only_files(),
                     trackers,
                     peers,
+                    force_start: record.force_start,
                     key,
                 });
             }
@@ -1165,7 +1241,11 @@ impl Worker {
             torrents.push(TorrentView {
                 key: format!("pending:{}", p.id),
                 name: p.label.clone(),
-                state: if blocked { State::Blocked } else { State::FetchingInfo },
+                state: match (blocked, p.paused) {
+                    (true, true) => State::Paused,
+                    (true, false) => State::Blocked,
+                    (false, _) => State::FetchingInfo,
+                },
                 error: None,
                 total: 0,
                 done: 0,
@@ -1176,16 +1256,19 @@ impl Worker {
                 peers_seen: 0,
                 category: p.category.clone(),
                 tags: Vec::new(),
-                save_path: self.store.data.settings.download_dir.to_string_lossy().into_owned(),
+                save_path: manage::folder_for(&self.store.data.settings, p.folder.as_ref(), p.category.as_deref())
+                    .to_string_lossy()
+                    .into_owned(),
                 added_at: p.added_at,
                 held: None,
                 queue_pos: None,
                 ratio_limit_pct: None,
                 files: Arc::default(),
                 file_done: Vec::new(),
-                selected: None,
+                selected: p.files.clone(),
                 trackers: Arc::default(),
                 peers: Vec::new(),
+                force_start: false,
             });
         }
 
@@ -1228,6 +1311,7 @@ impl Worker {
             interfaces: self.interfaces.clone(),
             remote_on: self.remote_task.is_some(),
             remote_error: self.remote_error.clone(),
+            inspected: self.inspector.views(),
         };
         let mut current = self.shared.lock().unwrap_or_else(|e| e.into_inner());
         if **current != snapshot {
@@ -1295,11 +1379,13 @@ async fn fetch_feed(http: &reqwest::Client, url: &str) -> Result<String, String>
 async fn add_to_engine(
     session: &Arc<Session>,
     source: Source,
-    folder: String,
+    mut options: AddTorrentOptions,
+    prepared: Option<Prepared>,
 ) -> Result<(String, String, bool), String> {
-    let add = match source {
-        Source::Link(url) => AddTorrent::from_url(url),
-        Source::File(path) => {
+    let add = match (prepared, source) {
+        (Some(prepared), _) => prepared.into_add(&mut options),
+        (None, Source::Link(url)) => AddTorrent::from_url(url),
+        (None, Source::File(path)) => {
             let bytes = tokio::task::spawn_blocking(move || {
                 std::fs::read(&path).map_err(|e| format!("could not read {}: {e}", path.display()))
             })
@@ -1307,11 +1393,6 @@ async fn add_to_engine(
             .map_err(|e| e.to_string())??;
             AddTorrent::from_bytes(bytes)
         }
-    };
-    let options = AddTorrentOptions {
-        overwrite: true,
-        output_folder: Some(folder),
-        ..Default::default()
     };
     let (handle, already) = match session
         .add_torrent(add, Some(options))
