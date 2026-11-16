@@ -5,6 +5,7 @@
 //! torrent engine directly.
 pub mod arbiter;
 pub mod blocklist;
+pub mod comfort;
 mod engine;
 pub mod feeds;
 pub mod format;
@@ -24,6 +25,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub use arbiter::HoldReason;
+pub use comfort::{AllTime, ComfortSettings, Finished, PieceMap, SpeedHistory, Theme, WhenAllDone};
 pub use engine::Command;
 pub use feeds::Feed;
 pub use limits::{LimitSettings, SeedStop, Seeding, SlowMode, SlowReason, TorrentLimits};

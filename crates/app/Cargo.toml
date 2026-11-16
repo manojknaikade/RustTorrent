@@ -15,6 +15,7 @@ png = { version = "0.18", optional = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-foundation = "0.3"
+block2 = "0.6"
 
 [features]
 # Lets RUSTTORRENT_SHOT=<file.png> save a picture of the window. Used for testing only.

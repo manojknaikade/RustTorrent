@@ -163,4 +163,16 @@ pub struct Snapshot {
     /// What each torrent's file says about itself, by key. Missing until the details
     /// of a link have arrived.
     pub details: Arc<std::collections::HashMap<String, crate::make::Details>>,
+    /// Total speeds over the last few minutes.
+    pub speeds: Arc<crate::comfort::SpeedHistory>,
+    /// Totals over the app's whole life. Its running time is as of when this run started.
+    pub all_time: crate::comfort::AllTime,
+    /// When this run started, in seconds since 1970.
+    pub running_since: u64,
+    /// Downloads that finished while the app was running, oldest first.
+    pub finished: Vec<crate::comfort::Finished>,
+    /// Every download has finished and the user asked the app to quit then.
+    pub quit_now: bool,
+    /// Which pieces are done, for the torrent the front end asked about with `Watch`.
+    pub pieces: Option<Arc<crate::comfort::PieceMap>>,
 }

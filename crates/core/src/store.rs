@@ -45,6 +45,7 @@ pub struct Settings {
     pub limits: LimitSettings,
     /// Port, peer finding, proxy and block list. Applied by starting a new engine session.
     pub network: crate::network::NetworkSettings,
+    pub comfort: crate::comfort::ComfortSettings,
 }
 
 /// Remote control from a browser. Off until the user turns it on and sets a password.
@@ -98,6 +99,7 @@ impl Default for Settings {
             category_dirs: BTreeMap::new(),
             limits: LimitSettings::default(),
             network: Default::default(),
+            comfort: crate::comfort::ComfortSettings::default(),
         }
     }
 }
@@ -154,6 +156,8 @@ pub struct Data {
     pub feeds: Vec<Feed>,
     /// What the app remembers about each feed, by the feed's address.
     pub feed_state: BTreeMap<String, FeedState>,
+    /// Totals over the app's whole life.
+    pub all_time: crate::comfort::AllTime,
 }
 
 impl Default for Data {
@@ -165,6 +169,7 @@ impl Default for Data {
             pending: Vec::new(),
             feeds: Vec::new(),
             feed_state: BTreeMap::new(),
+            all_time: crate::comfort::AllTime::default(),
         }
     }
 }

@@ -146,6 +146,8 @@ pub enum Command {
         key: String,
         path: PathBuf,
     },
+    /// Notifications, keeping awake, theme, what to do when downloads finish.
+    SetComfort(crate::comfort::ComfortSettings),
 }
 
 type Handle = Arc<ManagedTorrent>;
@@ -251,6 +253,7 @@ struct Worker {
     jobs: u64,
     /// What each torrent's file says about itself, by key.
     details: Arc<HashMap<String, crate::make::Details>>,
+    comfort: crate::comfort::Tracker,
 }
 
 mod make;
@@ -298,6 +301,7 @@ async fn main_loop(
 
     let (add_tx, mut add_rx) = tokio::sync::mpsc::unbounded_channel();
     let (feed_tx, mut feed_rx) = tokio::sync::mpsc::unbounded_channel();
+    let comfort = crate::comfort::Tracker::new(&store.data.all_time);
     let mut w = Worker {
         session: None,
         bound: None,
@@ -337,6 +341,7 @@ async fn main_loop(
         making: None,
         jobs: 0,
         details: Arc::default(),
+        comfort,
     };
     if let Some(note) = note {
         w.notice(note, true);
@@ -418,6 +423,7 @@ impl Worker {
     }
 
     fn save(&mut self) {
+        self.store.data.all_time.running_secs = self.comfort.running_secs();
         match self.store.save() {
             Ok(()) => {
                 self.dirty = false;
@@ -521,6 +527,7 @@ impl Worker {
         self.slow_since.clear();
         self.applied_limits = None;
         self.net_used = None;
+        self.comfort.forget_counters();
     }
 
     async fn start_session(&mut self, bind: Option<String>) -> anyhow::Result<()> {
@@ -1062,7 +1069,29 @@ impl Worker {
                 }
                 Err(text) => self.notice(text, true),
             },
+            Command::SetComfort(comfort) => {
+                let settings = &mut self.store.data.settings;
+                if comfort.when_all_done != settings.comfort.when_all_done {
+                    self.comfort.disarm();
+                }
+                settings.comfort = comfort;
+                self.save();
+            }
         }
+    }
+
+    /// A download finished just now: say so and run the user's program, if any.
+    fn finished(&mut self, key: &str, handle: &Handle) {
+        let name = handle.name().unwrap_or_else(|| key.to_owned());
+        let folder = handle.output_folder().to_path_buf();
+        self.notice(format!("Finished downloading {name}"), false);
+        let program = self.store.data.settings.comfort.on_finish_program.clone();
+        if !program.trim().is_empty() {
+            if let Err(e) = crate::comfort::run_finish_program(&program, &name, &folder) {
+                self.notice(e, true);
+            }
+        }
+        (self.comfort).add_finished(key.to_owned(), name, folder.to_string_lossy().into_owned());
     }
 
     /// Adds the `.torrent` files found in the watch folder. Each one is renamed first, so
@@ -1195,6 +1224,7 @@ impl Worker {
                 record.uploaded += delta;
                 self.dirty = true;
             }
+            self.store.data.all_time.uploaded += delta;
         }
     }
 
@@ -1240,6 +1270,7 @@ impl Worker {
         let mut torrents = Vec::new();
         let (mut down_total, mut up_total) = (0, 0);
         let clock = local_clock();
+        let mut pieces = None;
         let schedule_off = !self.store.data.settings.schedule.allows(clock);
         if rules::slow_mode_tick(&mut self.store.data.settings.limits.slow, clock) {
             self.dirty = true;
@@ -1294,6 +1325,15 @@ impl Worker {
                         self.dirty = true;
                     }
                 }
+                let downloaded = (stats.live.as_ref()).map(|l| l.snapshot.downloaded_and_checked_bytes);
+                let delta = self.comfort.count_download(&key, downloaded);
+                if delta > 0 {
+                    self.store.data.all_time.downloaded += delta;
+                    self.dirty = true;
+                }
+                if self.comfort.check_finish(&key, live, stats.finished) {
+                    self.finished(&key, &handle);
+                }
                 rows.push((handle, key, stats));
             }
             let items: Vec<rules::Item> = rows.iter().map(|(_, key, stats)| self.item(key, stats)).collect();
@@ -1347,6 +1387,7 @@ impl Worker {
                 up_total += up_bps;
 
                 let peers = if self.watched.as_deref() == Some(key.as_str()) {
+                    pieces = crate::comfort::piece_map(&session, &handle).map(Arc::new);
                     peers_of(&handle)
                 } else {
                     Vec::new()
@@ -1439,6 +1480,8 @@ impl Worker {
         }
 
         let (making, details) = self.make_tick().await;
+        self.comfort.speeds.push(now_secs(), down_total, up_total);
+        let quit_now = (self.comfort).should_quit(self.store.data.settings.comfort.when_all_done, &torrents);
         let snapshot = Snapshot {
             ready: true,
             fatal: None,
@@ -1471,6 +1514,15 @@ impl Worker {
             network: self.net_used.as_ref().map(|(_, s)| s.clone()).unwrap_or_default(),
             making,
             details,
+            speeds: Arc::new(self.comfort.speeds.clone()),
+            all_time: crate::comfort::AllTime {
+                running_secs: self.comfort.running().0,
+                ..self.store.data.all_time
+            },
+            running_since: self.comfort.running().1,
+            finished: self.comfort.finished.clone(),
+            quit_now,
+            pieces,
         };
         let mut current = self.shared.lock().unwrap_or_else(|e| e.into_inner());
         if **current != snapshot {

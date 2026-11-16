@@ -9,7 +9,7 @@ use rusttorrent_core::{format, manage, Command, Core, Feed, HoldReason, Move, Sc
 mod limits;
 
 fn color(state: State) -> Color32 {
-    match state {
+    crate::comfort::ink(match state {
         State::Downloading => Color32::from_rgb(64, 156, 255),
         State::Seeding => Color32::from_rgb(52, 199, 123),
         State::Paused => Color32::from_rgb(150, 150, 158),
@@ -17,7 +17,7 @@ fn color(state: State) -> Color32 {
         State::FetchingInfo | State::Checking => Color32::from_rgb(230, 170, 60),
         State::Completed => Color32::from_rgb(120, 200, 190),
         State::Blocked | State::Error => Color32::from_rgb(240, 90, 90),
-    }
+    })
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -115,6 +115,7 @@ struct SettingsDialog {
     magnet_handler: Option<String>,
     ask_before_add: bool,
     network: crate::network::Form,
+    comfort: rusttorrent_core::ComfortSettings,
 }
 
 /// Asks for the name of a new category or tag for some torrents.
@@ -180,6 +181,7 @@ impl SettingsDialog {
             magnet_handler: None,
             ask_before_add: s.ask_before_add,
             network: crate::network::Form::of(&s.network),
+            comfort: s.comfort.clone(),
         }
     }
 }
@@ -249,6 +251,9 @@ pub struct App {
     quit_ok: bool,
     limits: Option<limits::LimitsDialog>,
     create: Option<crate::make::CreateDialog>,
+    /// Show only torrents with a tracker on this host ("" for none).
+    tracker: Option<String>,
+    extras: crate::comfort::Extras,
 }
 
 fn ratio_of(t: &TorrentView) -> f64 {
@@ -274,7 +279,7 @@ fn reveal(path: &str) {
     let _ = std::process::Command::new(program).arg(path).spawn();
 }
 
-const REVEAL: &str = if cfg!(target_os = "macos") {
+pub(crate) const REVEAL: &str = if cfg!(target_os = "macos") {
     "Show in Finder"
 } else {
     "Open folder"
@@ -323,6 +328,8 @@ impl App {
             quit_ok: false,
             limits: None,
             create: None,
+            tracker: None,
+            extras: Default::default(),
         }
     }
 
@@ -369,6 +376,7 @@ impl App {
                 self.filter.matches(t.state)
                     && self.category.as_ref().is_none_or(|c| t.category.as_ref() == Some(c))
                     && self.tag.as_ref().is_none_or(|g| t.tags.contains(g))
+                    && self.tracker.as_ref().is_none_or(|h| crate::comfort::has_tracker(t, h))
                     && (q.is_empty() || t.name.to_lowercase().contains(&q))
             })
             .collect();
@@ -458,6 +466,7 @@ impl App {
                 ui.separator();
                 ui.label(format!("↑ {}", format::speed(self.snap.up_bps)));
                 ui.label(RichText::new(format!("↓ {}", format::speed(self.snap.down_bps))).strong());
+                crate::comfort::sparkline(ui, &mut self.extras, &self.snap);
             });
         });
         ui.add_space(6.0);
@@ -505,7 +514,9 @@ impl App {
             let text = format!("{}  {count}", f.label());
             let on = self.filter == f;
             let text = match f.dot() {
-                Some(c) => RichText::new(format!("● {text}")).color(if on { Color32::WHITE } else { c }),
+                Some(c) => {
+                    RichText::new(format!("● {text}")).color(if on { ui.visuals().selection.stroke.color } else { c })
+                }
                 None => RichText::new(text),
             };
             if ui.selectable_label(on, text).clicked() {
@@ -547,6 +558,9 @@ impl App {
                         self.dirty = true;
                     }
                 }
+            }
+            if crate::comfort::tracker_section(ui, &snap.torrents, &mut self.tracker) {
+                self.dirty = true;
             }
         });
     }
@@ -604,6 +618,10 @@ impl App {
                 .text(RichText::new(format!("{:.1}%", t.progress() * 100.0)).size(11.0))
                 .desired_height(18.0),
         );
+        if let Some(map) = self.snap.pieces.as_ref().filter(|m| m.key == t.key) {
+            ui.add_space(2.0);
+            crate::comfort::piece_strip(ui, map, color(State::Downloading));
+        }
         ui.add_space(6.0);
         egui::Grid::new("overview")
             .num_columns(6)
@@ -805,23 +823,38 @@ impl App {
         // Set when the menu asks to save a torrent's file: its key and name.
         let mut save_file: Option<(String, String)> = None;
         let (categories, tags) = names_in_use(&snap);
-        TableBuilder::new(ui)
+        // Columns the user hid with a right-click on the header.
+        let hidden = &snap.settings.comfort.hidden_columns;
+        let shown = heads.map(|name| !crate::comfort::is_hidden(hidden, name));
+        let mut new_hidden: Option<Vec<String>> = None;
+        let widths = [
+            Column::exact(14.0),
+            Column::exact(30.0),
+            Column::remainder().at_least(200.0).clip(true),
+            Column::exact(150.0),
+            Column::exact(80.0),
+            Column::exact(90.0),
+            Column::exact(90.0),
+            Column::exact(80.0),
+            Column::exact(50.0),
+            Column::exact(50.0),
+        ];
+        let mut builder = TableBuilder::new(ui)
             .striped(true)
             .sense(Sense::click())
-            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-            .column(Column::exact(14.0))
-            .column(Column::exact(30.0))
-            .column(Column::remainder().at_least(200.0).clip(true))
-            .column(Column::exact(150.0))
-            .column(Column::exact(80.0))
-            .column(Column::exact(90.0))
-            .column(Column::exact(90.0))
-            .column(Column::exact(80.0))
-            .column(Column::exact(50.0))
-            .column(Column::exact(50.0))
+            .cell_layout(egui::Layout::left_to_right(egui::Align::Center));
+        for (column, on) in widths.into_iter().zip(shown) {
+            if on {
+                builder = builder.column(column);
+            }
+        }
+        builder
             .header(24.0, |mut h| {
                 for (i, name) in heads.iter().enumerate() {
-                    h.col(|ui| {
+                    if !shown[i] {
+                        continue;
+                    }
+                    let (_, cell) = h.col(|ui| {
                         let mark = match sort {
                             (c, asc) if c == i && i > 0 => {
                                 if asc {
@@ -834,8 +867,19 @@ impl App {
                         };
                         let label =
                             egui::Label::new(RichText::new(format!("{name}{mark}")).strong()).sense(Sense::click());
-                        if ui.add(label).clicked() && i > 0 {
+                        let label = ui.add(label);
+                        if label.clicked() && i > 0 {
                             sort = if sort.0 == i { (i, !sort.1) } else { (i, i <= 2) };
+                        }
+                        label.context_menu(|ui| {
+                            if let Some(list) = crate::comfort::columns_menu(ui, hidden) {
+                                new_hidden = Some(list);
+                            }
+                        });
+                    });
+                    cell.context_menu(|ui| {
+                        if let Some(list) = crate::comfort::columns_menu(ui, hidden) {
+                            new_hidden = Some(list);
                         }
                     });
                 }
@@ -848,37 +892,53 @@ impl App {
                     row.col(|ui| {
                         ui.label(RichText::new("●").color(color(t.state)));
                     });
-                    row.col(|ui| {
-                        if let Some(p) = t.queue_pos {
-                            ui.label(RichText::new(p.to_string()).weak());
-                        }
-                    });
+                    if shown[1] {
+                        row.col(|ui| {
+                            if let Some(p) = t.queue_pos {
+                                ui.label(RichText::new(p.to_string()).weak());
+                            }
+                        });
+                    }
                     row.col(|ui| {
                         ui.add(egui::Label::new(&t.name).truncate().selectable(false));
                     });
-                    row.col(|ui| bar(ui, t));
-                    row.col(|ui| {
-                        ui.label(if t.total == 0 {
-                            "–".to_owned()
-                        } else {
-                            format::bytes(t.total)
+                    if shown[3] {
+                        row.col(|ui| bar(ui, t));
+                    }
+                    if shown[4] {
+                        row.col(|ui| {
+                            ui.label(if t.total == 0 {
+                                "–".to_owned()
+                            } else {
+                                format::bytes(t.total)
+                            });
                         });
-                    });
-                    row.col(|ui| {
-                        ui.label(format::speed(t.down_bps));
-                    });
-                    row.col(|ui| {
-                        ui.label(format::speed(t.up_bps));
-                    });
-                    row.col(|ui| {
-                        ui.label(format::eta(t.total.saturating_sub(t.done), t.down_bps));
-                    });
-                    row.col(|ui| {
-                        ui.label(t.peers_live.to_string());
-                    });
-                    row.col(|ui| {
-                        ui.label(format::ratio(t.uploaded, t.done));
-                    });
+                    }
+                    if shown[5] {
+                        row.col(|ui| {
+                            ui.label(format::speed(t.down_bps));
+                        });
+                    }
+                    if shown[6] {
+                        row.col(|ui| {
+                            ui.label(format::speed(t.up_bps));
+                        });
+                    }
+                    if shown[7] {
+                        row.col(|ui| {
+                            ui.label(format::eta(t.total.saturating_sub(t.done), t.down_bps));
+                        });
+                    }
+                    if shown[8] {
+                        row.col(|ui| {
+                            ui.label(t.peers_live.to_string());
+                        });
+                    }
+                    if shown[9] {
+                        row.col(|ui| {
+                            ui.label(format::ratio(t.uploaded, t.done));
+                        });
+                    }
                     let response = row.response();
                     if response.clicked() {
                         clicked = Some(idx);
@@ -1111,6 +1171,11 @@ impl App {
                 self.core.send(Command::SaveTorrentFile { key, path });
             }
         }
+        if let Some(hidden_columns) = new_hidden {
+            let mut comfort = snap.settings.comfort.clone();
+            comfort.hidden_columns = hidden_columns;
+            self.core.send(Command::SetComfort(comfort));
+        }
     }
 
     fn dialogs(&mut self, ctx: &egui::Context) {
@@ -1251,6 +1316,7 @@ impl App {
             }
         }
 
+        let (mut open_stats, mut open_log) = (false, false);
         if let Some(dialog) = &mut self.settings {
             let (mut close, mut save) = (false, false);
             let core = &self.core;
@@ -1543,6 +1609,14 @@ impl App {
                     }
                 }
                 ui.add_space(8.0);
+                ui.separator();
+                // Folded so the dialog still fits on a small screen.
+                egui::CollapsingHeader::new("Finished downloads, look and statistics")
+                    .default_open(crate::comfort::shot_theme().is_some())
+                    .show(ui, |ui| {
+                        (open_stats, open_log) = crate::comfort::settings_section(ui, &mut dialog.comfort);
+                    });
+                ui.add_space(8.0);
                 ui.label(
                     RichText::new(format!("RustTorrent {}", rusttorrent_core::VERSION))
                         .small()
@@ -1597,12 +1671,22 @@ impl App {
                     core.send(Command::SetAskBeforeAdd(dialog.ask_before_add));
                 }
                 crate::network::save(core, &dialog.network, snap);
+                if dialog.comfort != snap.settings.comfort {
+                    core.send(Command::SetComfort(dialog.comfort.clone()));
+                }
                 close = true;
             }
-            if close || response.should_close() {
+            if close || response.should_close() || open_stats || open_log {
                 self.settings = None;
             }
         }
+        if open_stats {
+            self.extras.stats = true;
+        }
+        if open_log {
+            self.extras.open_log();
+        }
+        self.extras.windows(ctx, &self.snap);
 
         if let Some(dialog) = &mut self.name {
             let (mut close, mut save) = (false, false);
@@ -1904,7 +1988,7 @@ impl eframe::App for App {
                 use std::sync::atomic::{AtomicBool, Ordering};
                 static OPENED: AtomicBool = AtomicBool::new(false);
                 let wanted = std::env::var("RUSTTORRENT_SHOT_TAB").unwrap_or_default();
-                let known = ["feeds", "settings", "add", "quit", "limits"].contains(&wanted.as_str())
+                let known = ["feeds", "settings", "add", "quit", "limits", "stats", "log"].contains(&wanted.as_str())
                     || wanted.starts_with("create");
                 if known && self.snap.ready && !OPENED.swap(true, Ordering::Relaxed) {
                     if wanted == "limits" {
@@ -1929,6 +2013,10 @@ impl eframe::App for App {
                         self.adding.push(text);
                     } else if wanted == "quit" {
                         self.quit = true;
+                    } else if wanted == "stats" {
+                        self.extras.stats = true;
+                    } else if wanted == "log" {
+                        self.extras.open_log();
                     } else {
                         self.settings = Some(SettingsDialog::of(&self.snap.settings));
                     }
@@ -1993,8 +2081,8 @@ impl eframe::App for App {
         egui::CentralPanel::default().show(ui, |ui| self.table(ui));
         self.dialogs(&ctx);
 
-        // Peers are only gathered for the torrent whose Peers tab is open.
-        let want = if self.tab == Tab::Peers {
+        // Peers and pieces are only gathered for the torrent whose Overview or Peers tab is open.
+        let want = if matches!(self.tab, Tab::Peers | Tab::Overview) {
             self.focus.clone()
         } else {
             None
@@ -2010,6 +2098,11 @@ impl eframe::App for App {
 
     fn on_exit(&mut self) {
         self.core.shutdown();
+    }
+
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let snap = self.core.snapshot();
+        self.extras.logic(ctx, &snap);
     }
 }
 
