@@ -3,8 +3,11 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod app;
+mod comfort;
 #[cfg(target_os = "macos")]
 mod mac;
+#[cfg(target_os = "macos")]
+mod mac_extras;
 
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
@@ -15,6 +18,8 @@ use eframe::egui;
 /// for the window to pass them on.
 static INBOX: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static CTX: OnceLock<egui::Context> = OnceLock::new();
+/// Where the app keeps its state and log.
+pub(crate) static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 pub(crate) fn deliver(text: String) {
     INBOX.lock().unwrap_or_else(|e| e.into_inner()).push(text);
@@ -40,6 +45,7 @@ fn main() -> eframe::Result {
     let data_dir = std::env::var_os("RUSTTORRENT_DATA_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(rusttorrent_core::default_data_dir);
+    let _ = DATA_DIR.set(data_dir.clone());
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()

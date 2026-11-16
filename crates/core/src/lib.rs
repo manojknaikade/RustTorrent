@@ -4,6 +4,7 @@
 //! it sends [`Command`]s and it reads the latest [`Snapshot`]. It never touches the
 //! torrent engine directly.
 pub mod arbiter;
+pub mod comfort;
 mod engine;
 pub mod feeds;
 pub mod format;
@@ -19,6 +20,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub use arbiter::HoldReason;
+pub use comfort::{AllTime, ComfortSettings, Finished, PieceMap, SpeedHistory, Theme, WhenAllDone};
 pub use engine::Command;
 pub use feeds::Feed;
 pub use model::{FeedView, FileMeta, Notice, PeerView, Snapshot, State, TorrentView};

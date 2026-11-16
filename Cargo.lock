@@ -4645,6 +4645,7 @@ dependencies = [
 name = "rusttorrent"
 version = "0.6.0"
 dependencies = [
+ "block2 0.6.2",
  "eframe",
  "egui_extras",
  "objc2 0.6.5",
