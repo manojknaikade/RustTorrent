@@ -5,6 +5,7 @@
 mod add_dialog;
 mod app;
 mod comfort;
+mod feed_ui;
 #[cfg(target_os = "macos")]
 mod mac;
 #[cfg(target_os = "macos")]

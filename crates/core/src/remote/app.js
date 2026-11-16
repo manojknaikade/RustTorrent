@@ -6,6 +6,8 @@ const $ = (id) => document.getElementById(id);
 const rows = new Map(); // torrent key -> the parts of its list entry
 let timer = null;
 let limitsShown = "";
+let categories = [];
+const MAX_UPLOAD = 4 * 1024 * 1024; // the same as the app's
 
 async function call(path, body) {
   const options = { credentials: "same-origin", cache: "no-store" };
@@ -60,12 +62,18 @@ function makeRow(key) {
   const actions = document.createElement("div");
   actions.className = "actions";
   const toggle = document.createElement("button");
+  const files = document.createElement("button");
+  files.textContent = "Files";
+  const category = document.createElement("button");
+  category.textContent = "Category";
   const remove = document.createElement("button");
   remove.textContent = "Remove";
-  actions.append(toggle, remove);
+  actions.append(toggle, files, category, remove);
   li.append(name, bar, facts, actions);
 
-  const row = { li, name, bar, facts, toggle, paused: false };
+  const row = { li, name, bar, facts, toggle, files, paused: false, category: "" };
+  files.addEventListener("click", () => openFiles(key));
+  category.addEventListener("click", () => openCategory(key, row));
   toggle.addEventListener("click", () => {
     command({ do: row.paused ? "resume" : "pause", keys: [key] });
   });
@@ -105,12 +113,16 @@ function draw(state) {
     row.bar.value = t.total > 0 ? t.done / t.total : 0;
     row.paused = t.state === "Paused";
     row.toggle.textContent = row.paused ? "Resume" : "Pause";
+    row.files.hidden = t.files < 2;
+    row.category = t.category || "";
 
     const percent = t.total > 0 ? (100 * t.done / t.total).toFixed(1) + "%" : "";
     const parts = [t.state, percent, t.total > 0 ? size(t.total) : ""];
     if (t.down_bps > 0) parts.push("↓ " + size(t.down_bps) + "/s");
     if (t.up_bps > 0) parts.push("↑ " + size(t.up_bps) + "/s");
-    if (t.peers > 0) parts.push(t.peers + (t.peers === 1 ? " peer" : " peers"));
+    if (t.down_bps > 0 && t.eta !== "–") parts.push(t.eta + " left");
+    if (t.peers > 0 || t.peers_seen > 0) parts.push(t.peers + " of " + t.peers_seen + " peers");
+    if (t.ratio !== "–") parts.push("ratio " + t.ratio);
     if (t.category) parts.push(t.category);
     row.facts.textContent = parts.filter(Boolean).join(" · ");
     if (t.error) {
@@ -136,6 +148,62 @@ function draw(state) {
     $("limit-up").value = state.up_limit_kib;
   }
   $("footer").textContent = "RustTorrent " + state.version;
+  categories = state.categories || [];
+}
+
+async function openFiles(key) {
+  const { status, data } = await call("/api/files/" + encodeURIComponent(key));
+  if (status === 401) { show(false); return; }
+  if (status !== 200) { say(data.error || "That did not work."); return; }
+  const dialog = $("files-dialog");
+  const list = $("files-list");
+  list.replaceChildren();
+  $("files-name").textContent = data.name;
+  const boxes = [];
+  data.files.forEach((f, i) => {
+    const label = document.createElement("label");
+    label.className = "check";
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.checked = f.chosen;
+    boxes.push([i, box]);
+    const text = document.createElement("span");
+    text.className = "file";
+    text.textContent = f.name;
+    const facts = document.createElement("span");
+    facts.className = "muted";
+    facts.textContent = size(f.len) + (f.len > 0 ? " · " + Math.floor(100 * f.done / f.len) + "%" : "");
+    label.append(box, text, facts);
+    list.append(label);
+  });
+  dialog.returnValue = "cancel";
+  dialog.onclose = () => {
+    if (dialog.returnValue !== "save") return;
+    const chosen = boxes.filter(([, box]) => box.checked).map(([i]) => i);
+    if (chosen.length === 0) { say("Choose at least one file."); return; }
+    command({ do: "files", key, files: chosen }).then((ok) => { if (ok) say("Files chosen."); });
+  };
+  dialog.showModal();
+}
+
+function openCategory(key, row) {
+  const dialog = $("category-dialog");
+  $("category-name").textContent = row.name.textContent;
+  const known = $("category-known");
+  known.replaceChildren();
+  for (const name of categories) {
+    const option = document.createElement("option");
+    option.value = name;
+    known.append(option);
+  }
+  $("category-text").value = row.category;
+  dialog.returnValue = "cancel";
+  dialog.onclose = () => {
+    if (dialog.returnValue !== "save") return;
+    const text = $("category-text").value.trim();
+    command({ do: "category", keys: [key], category: text || null });
+  };
+  dialog.showModal();
 }
 
 async function refresh() {
@@ -182,6 +250,32 @@ $("add-form").addEventListener("submit", async (event) => {
   if (await command({ do: "add", text: box.value.trim() })) {
     box.value = "";
     say("Added.");
+  }
+});
+
+$("upload").addEventListener("change", async () => {
+  const input = $("upload");
+  const file = input.files[0];
+  input.value = "";
+  if (!file) return;
+  if (file.size > MAX_UPLOAD) { say("That file is too large to be a torrent."); return; }
+  say("Sending " + file.name + "…");
+  try {
+    const response = await fetch("/api/upload", {
+      method: "POST",
+      credentials: "same-origin",
+      cache: "no-store",
+      headers: { "Content-Type": "application/x-bittorrent", "X-RustTorrent": "1" },
+      body: file,
+    });
+    let data = {};
+    try { data = await response.json(); } catch (e) { /* an empty answer */ }
+    if (response.status === 401) { show(false); return; }
+    if (response.status !== 200) { say(data.error || "That did not work."); return; }
+    say("Added " + data.name + ".");
+    refresh();
+  } catch (e) {
+    say("RustTorrent is not answering.");
   }
 });
 

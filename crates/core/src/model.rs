@@ -2,7 +2,7 @@
 use std::sync::Arc;
 
 use crate::arbiter::HoldReason;
-use crate::feeds::Feed;
+use crate::feeds::{Feed, Item};
 use crate::limits::{SlowReason, TorrentLimits};
 use crate::net::Interface;
 use crate::store::Settings;
@@ -175,4 +175,25 @@ pub struct Snapshot {
     pub quit_now: bool,
     /// Which pieces are done, for the torrent the front end asked about with `Watch`.
     pub pieces: Option<Arc<crate::comfort::PieceMap>>,
+    /// A feed's items as last read for the window to show, if it asked for them.
+    pub feed_preview: Option<FeedPreview>,
+    /// The SHA-256 fingerprint of the remote-control page's certificate, while it uses HTTPS.
+    pub remote_fingerprint: Option<String>,
+}
+
+/// One feed's items, read so the user can see what its filter takes before saving it.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct FeedPreview {
+    pub url: String,
+    /// Still being read.
+    pub loading: bool,
+    pub error: Option<String>,
+    /// In the feed's order, newest first.
+    pub items: Vec<Item>,
+    /// Which of these items the feed has already handed to the downloader.
+    pub seen: Vec<String>,
+    /// Seasons and episodes the feed has already taken, such as "S02E05".
+    pub taken: Vec<String>,
+    /// The feed has been read since "only newer items" was turned on.
+    pub primed: bool,
 }

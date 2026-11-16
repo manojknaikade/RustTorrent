@@ -60,6 +60,8 @@ pub struct RemoteSettings {
     /// The password is never kept, only this salt and the hash made with it, in hex.
     pub salt: String,
     pub hash: String,
+    /// Serve the page over HTTPS with a certificate made on this computer.
+    pub https: bool,
 }
 
 impl RemoteSettings {
@@ -76,6 +78,7 @@ impl Default for RemoteSettings {
             lan: false,
             salt: String::new(),
             hash: String::new(),
+            https: false,
         }
     }
 }
@@ -143,6 +146,10 @@ pub struct FeedState {
     pub checked_at: u64,
     /// Why the last read failed, if it did.
     pub error: Option<String>,
+    /// Seasons and episodes already taken, such as "S02E05", for feeds that skip repeats.
+    pub episodes: Vec<String>,
+    /// The feed has been read once since "only newer items" was turned on.
+    pub primed: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -286,6 +293,7 @@ mod tests {
                 seen: vec!["id-1".into()],
                 checked_at: 9,
                 error: None,
+                ..Default::default()
             },
         );
         store.data.torrents.insert(

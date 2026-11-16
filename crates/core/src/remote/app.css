@@ -74,3 +74,9 @@ dialog {
 dialog::backdrop { background: rgba(0, 0, 0, 0.45); }
 #remove-name { overflow-wrap: anywhere; margin: 0 0 12px; }
 footer { margin-top: 16px; }
+.upload { display: block; margin: 8px 2px 0; font-size: 14px; color: var(--muted); }
+.upload input { font-size: 14px; max-width: 100%; }
+.files { display: grid; gap: 6px; max-height: 50vh; overflow-y: auto; }
+.files .file { overflow-wrap: anywhere; flex: 1; }
+#files-name, #category-name { overflow-wrap: anywhere; margin: 0 0 12px; }
+#category-text { width: 100%; }
