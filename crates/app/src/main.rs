@@ -6,6 +6,7 @@ mod add_dialog;
 mod app;
 #[cfg(target_os = "macos")]
 mod mac;
+mod network;
 
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};

@@ -114,6 +114,7 @@ struct SettingsDialog {
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     magnet_handler: Option<String>,
     ask_before_add: bool,
+    network: crate::network::Form,
 }
 
 /// Asks for the name of a new category or tag for some torrents.
@@ -178,6 +179,7 @@ impl SettingsDialog {
             #[cfg(not(target_os = "macos"))]
             magnet_handler: None,
             ask_before_add: s.ask_before_add,
+            network: crate::network::Form::of(&s.network),
         }
     }
 }
@@ -576,7 +578,7 @@ impl App {
         match self.tab {
             Tab::Overview => self.overview(ui, t),
             Tab::Files => self.files(ui, t),
-            Tab::Peers => peers(ui, t),
+            Tab::Peers => peers(ui, t, &self.core),
             Tab::Trackers => trackers(ui, t),
         }
     }
@@ -1462,6 +1464,14 @@ impl App {
                     .small()
                     .weak(),
                 );
+                crate::network::section(
+                    ui,
+                    &mut dialog.network,
+                    dialog.interface.as_deref(),
+                    dialog.remote_on,
+                    snap,
+                );
+                let problem = problem.or(dialog.network.problem(dialog.interface.as_deref()));
                 #[cfg(target_os = "macos")]
                 {
                     ui.add_space(8.0);
@@ -1539,6 +1549,7 @@ impl App {
                 if dialog.ask_before_add != snap.settings.ask_before_add {
                     core.send(Command::SetAskBeforeAdd(dialog.ask_before_add));
                 }
+                crate::network::save(core, &dialog.network, snap);
                 close = true;
             }
             if close || response.should_close() {
@@ -1731,7 +1742,7 @@ fn now() -> u64 {
         .unwrap_or(0)
 }
 
-fn peers(ui: &mut egui::Ui, t: &TorrentView) {
+fn peers(ui: &mut egui::Ui, t: &TorrentView, core: &Core) {
     if t.peers.is_empty() {
         ui.label(RichText::new("No connected peers.").weak());
         return;
@@ -1739,6 +1750,7 @@ fn peers(ui: &mut egui::Ui, t: &TorrentView) {
     TableBuilder::new(ui)
         .id_salt("peers")
         .striped(true)
+        .sense(Sense::click())
         .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
         .column(Column::exact(220.0))
         .column(Column::remainder().at_least(120.0).clip(true))
@@ -1770,6 +1782,8 @@ fn peers(ui: &mut egui::Ui, t: &TorrentView) {
                 row.col(|ui| {
                     ui.label(format::bytes(p.uploaded));
                 });
+                row.response()
+                    .context_menu(|ui| crate::network::peer_menu(ui, core, &p.addr));
             });
         });
 }

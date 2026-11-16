@@ -43,6 +43,8 @@ pub struct Settings {
     pub category_dirs: BTreeMap<String, PathBuf>,
     /// Slow mode, seeding time limits, queue limits and peers per torrent.
     pub limits: LimitSettings,
+    /// Port, peer finding, proxy and block list. Applied by starting a new engine session.
+    pub network: crate::network::NetworkSettings,
 }
 
 /// Remote control from a browser. Off until the user turns it on and sets a password.
@@ -95,6 +97,7 @@ impl Default for Settings {
             ask_before_add: true,
             category_dirs: BTreeMap::new(),
             limits: LimitSettings::default(),
+            network: Default::default(),
         }
     }
 }

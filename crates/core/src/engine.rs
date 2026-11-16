@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use librqbit::api::TorrentIdOrHash;
 use librqbit::limits::LimitsConfig;
 use librqbit::{
-    AddTorrent, AddTorrentOptions, AddTorrentResponse, ListenerOptions, ManagedTorrent, Session, SessionOptions,
+    AddTorrent, AddTorrentOptions, AddTorrentResponse, ManagedTorrent, Session, SessionOptions,
     SessionPersistenceConfig, TorrentStatsState,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -133,6 +133,10 @@ pub enum Command {
         time_limit_min: Option<u32>,
         idle_limit_min: Option<u32>,
     },
+    /// Replaces the network settings. The engine restarts to apply them.
+    SetNetwork(crate::network::NetworkSettings),
+    /// Blocks a peer's address (`1.2.3.4:6881`) from now on. The engine restarts to apply it.
+    BanPeer(String),
 }
 
 type Handle = Arc<ManagedTorrent>;
@@ -230,6 +234,8 @@ struct Worker {
     applied_limits: Option<(u32, u32)>,
     /// The peers per torrent the running session was started with.
     session_peers: u32,
+    /// The network settings the running session was started with, and what it reports.
+    net_used: Option<(crate::network::NetworkSettings, crate::network::NetworkStatus)>,
 }
 
 /// How long a torrent must stay below the slow-torrent speeds to count as slow.
@@ -310,6 +316,7 @@ async fn main_loop(
         slow_since: HashMap::new(),
         applied_limits: None,
         session_peers: 0,
+        net_used: None,
     };
     if let Some(note) = note {
         w.notice(note, true);
@@ -493,19 +500,19 @@ impl Worker {
         self.last_up.clear();
         self.slow_since.clear();
         self.applied_limits = None;
+        self.net_used = None;
     }
 
     async fn start_session(&mut self, bind: Option<String>) -> anyhow::Result<()> {
         let settings = &self.store.data.settings;
+        let network = settings.network.clone();
+        let prepared = crate::network::prepare(&network, bind.as_deref(), &self.data_dir).await?;
         let options = SessionOptions {
             fastresume: true,
             persistence: Some(SessionPersistenceConfig::Json {
                 folder: Some(self.data_dir.join("session")),
             }),
-            listen: Some(ListenerOptions {
-                enable_upnp_port_forwarding: true,
-                ..Default::default()
-            }),
+            listen: Some(prepared.listen),
             ratelimits: LimitsConfig {
                 download_bps: limit(settings.down_limit_kib),
                 upload_bps: limit(settings.up_limit_kib),
@@ -516,6 +523,10 @@ impl Worker {
                 0 => None,
                 n => Some(n as usize),
             },
+            dht: prepared.dht,
+            disable_local_service_discovery: prepared.disable_local_service_discovery,
+            connect: prepared.connect,
+            blocklist_url: prepared.blocklist_url,
             ..Default::default()
         };
         let peers = settings.limits.peers_per_torrent;
@@ -523,7 +534,12 @@ impl Worker {
         // the next look sees a different number and starts again.
         let index = bind.as_deref().and_then(net::index);
         let session = Session::new_with_opts(settings.download_dir.clone(), options).await?;
-        self.http = http_client(bind.as_deref());
+        self.http = http_client(bind.as_deref(), network.proxy.url().as_deref());
+        let status = crate::network::NetworkStatus {
+            port: session.listen_addr().map(|a| a.port()),
+            ..prepared.status
+        };
+        self.net_used = Some((network, status));
         self.session = Some(session);
         self.bound = bind;
         self.bound_index = index;
@@ -549,7 +565,8 @@ impl Worker {
             let replaced = wanted.is_some() && wanted.as_deref().and_then(net::index) != self.bound_index;
             // The engine takes the number of peers per torrent only when it starts.
             let peers = self.session_peers == self.store.data.settings.limits.peers_per_torrent;
-            if self.bound == wanted && up && !replaced && peers {
+            let changed = self.net_used.as_ref().map(|(n, _)| n) != Some(&self.store.data.settings.network);
+            if self.bound == wanted && up && !replaced && peers && !changed {
                 return;
             }
             self.stop_session().await;
@@ -581,6 +598,7 @@ impl Worker {
             }
             Err(e) => {
                 let text = format!("All traffic is blocked: the torrent engine could not start: {e:#}");
+                let text = crate::network::redact(&text, &self.store.data.settings.network);
                 if self.blocked.as_deref() != Some(text.as_str()) {
                     self.notice(text.clone(), true);
                 }
@@ -1002,6 +1020,25 @@ impl Worker {
                 }
                 self.save();
             }
+            Command::SetNetwork(network) => {
+                self.store.data.settings.network = crate::network::clean(network);
+                // Try at once with the new settings, even if the last start failed moments ago.
+                self.last_try = None;
+                self.save();
+            }
+            Command::BanPeer(addr) => match crate::network::ban(&mut self.store.data.settings.network, &addr) {
+                Ok(ip) => {
+                    self.notice(
+                        format!(
+                            "Banned {ip}. The engine restarts to apply this, so transfers pause for a few seconds."
+                        ),
+                        false,
+                    );
+                    self.last_try = None;
+                    self.save();
+                }
+                Err(text) => self.notice(text, true),
+            },
         }
     }
 
@@ -1407,6 +1444,7 @@ impl Worker {
             remote_error: self.remote_error.clone(),
             inspected: self.inspector.views(),
             slow,
+            network: self.net_used.as_ref().map(|(_, s)| s.clone()).unwrap_or_default(),
         };
         let mut current = self.shared.lock().unwrap_or_else(|e| e.into_inner());
         if **current != snapshot {
@@ -1477,10 +1515,15 @@ fn peers_of(handle: &Handle) -> Vec<PeerView> {
 
 /// The client that reads feeds, tied to the interface if one is chosen. `None` if it
 /// cannot be tied to it: then feeds are not read at all rather than read some other way.
-fn http_client(bind: Option<&str>) -> Option<reqwest::Client> {
+/// Feeds go through the proxy when one is set.
+fn http_client(bind: Option<&str>, proxy: Option<&str>) -> Option<reqwest::Client> {
     let builder = reqwest::Client::builder()
         .user_agent(format!("RustTorrent/{}", crate::VERSION))
         .timeout(Duration::from_secs(30));
+    let builder = match proxy {
+        Some(url) => builder.proxy(reqwest::Proxy::all(url).ok()?),
+        None => builder,
+    };
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "android"))]
     let builder = match bind {
         Some(name) => builder.interface(name),

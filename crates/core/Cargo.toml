@@ -15,7 +15,7 @@ dirs = "6"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # Already part of the build through reqwest; used for hashing the remote-control password.
 aws-lc-rs = "1"
-reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "socks"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

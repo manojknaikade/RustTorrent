@@ -156,4 +156,6 @@ pub struct Snapshot {
     pub inspected: Vec<crate::manage::Inspection>,
     /// Whether slow mode is on, and why.
     pub slow: Option<SlowReason>,
+    /// What the running engine uses: the port in use and how many ranges are blocked.
+    pub network: crate::network::NetworkStatus,
 }
