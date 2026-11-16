@@ -137,6 +137,15 @@ pub enum Command {
     SetNetwork(crate::network::NetworkSettings),
     /// Blocks a peer's address (`1.2.3.4:6881`) from now on. The engine restarts to apply it.
     BanPeer(String),
+    /// Make a `.torrent` file from a file or folder, in the background. See [`crate::make`].
+    CreateTorrent(crate::make::MakeOptions),
+    /// Stop making the `.torrent` file.
+    CancelCreate,
+    /// Write a torrent's `.torrent` file here. Needs the torrent's details.
+    SaveTorrentFile {
+        key: String,
+        path: PathBuf,
+    },
 }
 
 type Handle = Arc<ManagedTorrent>;
@@ -236,7 +245,15 @@ struct Worker {
     session_peers: u32,
     /// The network settings the running session was started with, and what it reports.
     net_used: Option<(crate::network::NetworkSettings, crate::network::NetworkStatus)>,
+    /// The `.torrent` file being made, or the last one made.
+    making: Option<make::Making>,
+    /// Counts the `.torrent` files made.
+    jobs: u64,
+    /// What each torrent's file says about itself, by key.
+    details: Arc<HashMap<String, crate::make::Details>>,
 }
+
+mod make;
 
 /// How long a torrent must stay below the slow-torrent speeds to count as slow.
 const SLOW_AFTER: Duration = Duration::from_secs(60);
@@ -317,6 +334,9 @@ async fn main_loop(
         applied_limits: None,
         session_peers: 0,
         net_used: None,
+        making: None,
+        jobs: 0,
+        details: Arc::default(),
     };
     if let Some(note) = note {
         w.notice(note, true);
@@ -993,6 +1013,9 @@ impl Worker {
                 self.store.data.settings.ask_before_add = on;
                 self.save();
             }
+            Command::CreateTorrent(opts) => self.start_make(opts),
+            Command::CancelCreate => self.cancel_make(),
+            Command::SaveTorrentFile { key, path } => self.save_torrent_file(&key, path),
             Command::Shutdown => {}
             Command::SetSlowMode(on) => {
                 rules::set_slow_mode(&mut self.store.data.settings.limits.slow, on, local_clock());
@@ -1415,6 +1438,7 @@ impl Worker {
             self.start_remote().await;
         }
 
+        let (making, details) = self.make_tick().await;
         let snapshot = Snapshot {
             ready: true,
             fatal: None,
@@ -1445,6 +1469,8 @@ impl Worker {
             inspected: self.inspector.views(),
             slow,
             network: self.net_used.as_ref().map(|(_, s)| s.clone()).unwrap_or_default(),
+            making,
+            details,
         };
         let mut current = self.shared.lock().unwrap_or_else(|e| e.into_inner());
         if **current != snapshot {

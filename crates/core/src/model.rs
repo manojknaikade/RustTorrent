@@ -158,4 +158,9 @@ pub struct Snapshot {
     pub slow: Option<SlowReason>,
     /// What the running engine uses: the port in use and how many ranges are blocked.
     pub network: crate::network::NetworkStatus,
+    /// The torrent file being created, or the last one created.
+    pub making: Option<crate::make::MakeView>,
+    /// What each torrent's file says about itself, by key. Missing until the details
+    /// of a link have arrived.
+    pub details: Arc<std::collections::HashMap<String, crate::make::Details>>,
 }

@@ -248,6 +248,7 @@ pub struct App {
     /// The user agreed to quit.
     quit_ok: bool,
     limits: Option<limits::LimitsDialog>,
+    create: Option<crate::make::CreateDialog>,
 }
 
 fn ratio_of(t: &TorrentView) -> f64 {
@@ -321,6 +322,7 @@ impl App {
             quit: false,
             quit_ok: false,
             limits: None,
+            create: None,
         }
     }
 
@@ -428,6 +430,9 @@ impl App {
             }
             if ui.add_enabled(any, egui::Button::new("Remove")).clicked() {
                 self.ask_remove(self.selected.clone());
+            }
+            if ui.button("Create torrent").clicked() {
+                self.create = Some(crate::make::CreateDialog::new());
             }
             ui.separator();
             let search = egui::TextEdit::singleline(&mut self.search)
@@ -576,7 +581,12 @@ impl App {
         });
         ui.separator();
         match self.tab {
-            Tab::Overview => self.overview(ui, t),
+            Tab::Overview => {
+                // Scrolls when the panel is too short for every line.
+                egui::ScrollArea::vertical()
+                    .auto_shrink(false)
+                    .show(ui, |ui| self.overview(ui, t));
+            }
             Tab::Files => self.files(ui, t),
             Tab::Peers => peers(ui, t, &self.core),
             Tab::Trackers => trackers(ui, t),
@@ -661,7 +671,16 @@ impl App {
                     ],
                 );
                 row(ui, limits::overview_row(t, &self.snap));
+                if let Some(d) = self.snap.details.get(&t.key) {
+                    row(ui, crate::make::detail_row(d));
+                }
             });
+        if let Some(c) = self.snap.details.get(&t.key).and_then(|d| d.comment.as_deref()) {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Comment").weak());
+                ui.add(egui::Label::new(c).truncate());
+            });
+        }
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             ui.label(RichText::new("Category").weak());
@@ -783,6 +802,8 @@ impl App {
         let mut action: Option<(Command, bool)> = None;
         // Set when the menu asks for a new category (false) or tag (true).
         let mut ask_name: Option<(Vec<String>, bool)> = None;
+        // Set when the menu asks to save a torrent's file: its key and name.
+        let mut save_file: Option<(String, String)> = None;
         let (categories, tags) = names_in_use(&snap);
         TableBuilder::new(ui)
             .striped(true)
@@ -1025,6 +1046,17 @@ impl App {
                             ));
                             ui.close();
                         }
+                        ui.separator();
+                        // A link's file can be saved once its details have arrived.
+                        let known = snap.details.contains_key(&t.key);
+                        if ui
+                            .add_enabled(known, egui::Button::new("Save .torrent file…"))
+                            .on_disabled_hover_text("The details of this torrent have not arrived yet.")
+                            .clicked()
+                        {
+                            save_file = Some((t.key.clone(), t.name.clone()));
+                            ui.close();
+                        }
                     });
                 });
             });
@@ -1070,10 +1102,25 @@ impl App {
             self.sort = sort;
             self.dirty = true;
         }
+        if let Some((key, name)) = save_file {
+            let picked = rfd::FileDialog::new()
+                .add_filter("Torrent files", &["torrent"])
+                .set_file_name(format!("{name}.torrent"))
+                .save_file();
+            if let Some(path) = picked {
+                self.core.send(Command::SaveTorrentFile { key, path });
+            }
+        }
     }
 
     fn dialogs(&mut self, ctx: &egui::Context) {
         let mut texts: Vec<String> = Vec::new();
+        if let Some(dialog) = &mut self.create {
+            if dialog.show(ctx, &self.core, &self.snap) {
+                self.create = None;
+            }
+        }
+
         if let Some(text) = &mut self.add {
             let (mut close, mut submit) = (false, false);
             let response = egui::Modal::new(egui::Id::unique("add")).show(ctx, |ui| {
@@ -1857,10 +1904,23 @@ impl eframe::App for App {
                 use std::sync::atomic::{AtomicBool, Ordering};
                 static OPENED: AtomicBool = AtomicBool::new(false);
                 let wanted = std::env::var("RUSTTORRENT_SHOT_TAB").unwrap_or_default();
-                let known = ["feeds", "settings", "add", "quit", "limits"].contains(&wanted.as_str());
+                let known = ["feeds", "settings", "add", "quit", "limits"].contains(&wanted.as_str())
+                    || wanted.starts_with("create");
                 if known && self.snap.ready && !OPENED.swap(true, Ordering::Relaxed) {
                     if wanted == "limits" {
                         self.limits = Some(limits::LimitsDialog::of(&self.snap));
+                    } else if wanted.starts_with("create") {
+                        // "create" shows the window with RUSTTORRENT_SHOT_SOURCE chosen;
+                        // "creating" also starts the work.
+                        let source = std::env::var_os("RUSTTORRENT_SHOT_SOURCE").map(std::path::PathBuf::from);
+                        let mut dialog = match source {
+                            Some(s) => crate::make::CreateDialog::with_source(s),
+                            None => crate::make::CreateDialog::new(),
+                        };
+                        if wanted == "creating" {
+                            dialog.start(&self.core, &self.snap);
+                        }
+                        self.create = Some(dialog);
                     } else if wanted == "feeds" {
                         self.feeds = Some(FeedsDialog::of(&self.snap));
                     } else if wanted == "add" {
@@ -1898,7 +1958,8 @@ impl eframe::App for App {
             && self.feeds.is_none()
             && !self.adding.is_open()
             && !self.quit
-            && self.limits.is_none();
+            && self.limits.is_none()
+            && self.create.is_none();
         if !typing
             && no_dialog
             && ctx.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace))
