@@ -34,6 +34,9 @@ use crate::rules::{self, Clock, Move, Schedule};
 use crate::store::{Record, Store};
 use crate::{now_secs, Shared};
 
+mod feed_preview;
+mod upload;
+
 #[derive(Debug, Clone)]
 pub enum Command {
     /// A magnet link, web address, file address or file path. See [`crate::intake`].
@@ -102,6 +105,18 @@ pub enum Command {
     /// The torrent whose peers the front end wants to see.
     Watch(Option<String>),
     Shutdown,
+    /// Read one feed and show its items without downloading anything. `None` stops showing.
+    PreviewFeed(Option<String>),
+    /// Download one item of a feed by hand. The feed need not be saved yet.
+    AddFeedItem {
+        feed_url: String,
+        item: feeds::Item,
+        category: Option<String>,
+    },
+    /// A `.torrent` file's contents, sent from the remote-control page.
+    AddTorrentBytes(Vec<u8>),
+    /// Serve the remote-control page over HTTPS instead of plain HTTP.
+    SetRemoteHttps(bool),
 }
 
 type Handle = Arc<ManagedTorrent>;
@@ -132,6 +147,8 @@ struct FeedDone {
     url: String,
     /// The feed's text.
     result: Result<String, String>,
+    /// Read only to be shown, not to download from.
+    preview: bool,
 }
 
 struct AddDone {
@@ -185,6 +202,8 @@ struct Worker {
     remote_task: Option<tokio::task::JoinHandle<()>>,
     remote_error: Option<String>,
     remote_try: Option<Instant>,
+    preview: Option<crate::model::FeedPreview>,
+    remote_fingerprint: Option<String>,
 }
 
 pub(crate) fn run(
@@ -257,6 +276,8 @@ async fn main_loop(
         remote_task: None,
         remote_error: None,
         remote_try: None,
+        preview: None,
+        remote_fingerprint: None,
     };
     if let Some(note) = note {
         w.notice(note, true);
@@ -554,6 +575,7 @@ impl Worker {
             None => None,
         };
         self.store.data.pending.retain(|t| *t != done.text);
+        self.forget_upload(&done.text);
         match done.result {
             Ok((key, name, false)) => {
                 let queue_pos = self.next_queue_pos();
@@ -622,9 +644,21 @@ impl Worker {
         let before = self.remote_error.take();
         self.remote_try = Some(Instant::now());
         let remote = self.store.data.settings.remote.clone();
+        self.remote_fingerprint = None;
         if !remote.enabled {
             return;
         }
+        let tls = match remote.https.then(|| crate::remote::tls::acceptor(&self.data_dir)) {
+            None => None,
+            Some(Ok((acceptor, fingerprint))) => {
+                self.remote_fingerprint = Some(fingerprint);
+                Some(acceptor)
+            }
+            Some(Err(e)) => {
+                self.remote_error = Some(format!("Remote control could not set up HTTPS: {e}"));
+                return;
+            }
+        };
         let (Some(salt), Some(hash)) = (crate::remote::unhex(&remote.salt), crate::remote::unhex(&remote.hash)) else {
             self.remote_error = Some("The saved password cannot be read. Set a new one.".into());
             return;
@@ -643,6 +677,7 @@ impl Worker {
                     hash,
                     self.shared.clone(),
                     self.tx.clone(),
+                    tls,
                 )));
             }
             Err(e) => {
@@ -670,6 +705,7 @@ impl Worker {
                                 task.abort();
                             }
                             self.store.data.pending.retain(|t| *t != p.text);
+                            self.forget_upload(&p.text);
                         }
                         continue;
                     }
@@ -837,6 +873,10 @@ impl Worker {
                     if !data.feeds.contains(feed) {
                         if let Some(state) = data.feed_state.get_mut(&feed.url) {
                             state.checked_at = 0;
+                            // Turned on just now: what the feed lists now counts as old.
+                            if feed.newer_only && !data.feeds.iter().any(|f| f.url == feed.url && f.newer_only) {
+                                state.primed = false;
+                            }
                         }
                     }
                 }
@@ -850,6 +890,18 @@ impl Worker {
             }
             Command::Watch(key) => self.watched = key,
             Command::Shutdown => {}
+            Command::PreviewFeed(url) => self.preview_feed(url),
+            Command::AddFeedItem {
+                feed_url,
+                item,
+                category,
+            } => self.add_feed_item(feed_url, item, category),
+            Command::AddTorrentBytes(bytes) => self.add_upload(bytes),
+            Command::SetRemoteHttps(on) => {
+                self.store.data.settings.remote.https = on;
+                self.save();
+                self.start_remote().await;
+            }
         }
     }
 
@@ -903,12 +955,19 @@ impl Worker {
             let (http, tx, url) = (http.clone(), self.feed_tx.clone(), feed.url.clone());
             tokio::spawn(async move {
                 let result = fetch_feed(&http, &url).await;
-                let _ = tx.send(FeedDone { url, result });
+                let _ = tx.send(FeedDone {
+                    url,
+                    result,
+                    preview: false,
+                });
             });
         }
     }
 
     fn feed_done(&mut self, done: FeedDone) {
+        if done.preview {
+            return self.preview_done(done);
+        }
         self.feeds_busy.remove(&done.url);
         let Some(feed) = self.store.data.feeds.iter().find(|f| f.url == done.url).cloned() else {
             return;
@@ -928,21 +987,36 @@ impl Worker {
                 Ok(items)
             }
         });
+        // A filter saved by hand in the settings file may not be valid.
+        let result = result.and_then(|items| feed.rule().map(|rule| (rule, items)));
         match result {
-            Ok(items) => {
+            Ok((rule, items)) => {
                 state.error = None;
+                if rule.first_read(state.primed) {
+                    self.notice(
+                        format!(
+                            "Feed {shown}: the {} items it lists now are skipped. Newer ones will be added.",
+                            items.len()
+                        ),
+                        false,
+                    );
+                }
                 // Oldest first, so torrents join the queue in the order they were published.
-                for item in items.into_iter().rev() {
-                    if !feed.wants(&item.title) || state.seen.contains(&item.id) {
+                let picked = rule.pick(items, state.primed, &mut state.seen, &mut state.episodes);
+                state.primed = true;
+                for item in picked {
+                    if !feed_preview::is_link(&item.link) {
+                        self.notice(format!("Feed {shown}: {} has no web or magnet link.", item.title), true);
                         continue;
                     }
-                    state.seen.push(item.id);
                     self.notice(format!("Feed {shown}: adding {}", item.title), false);
                     self.add(item.link, feed.category.clone());
                 }
-                if state.seen.len() > KEEP_SEEN {
-                    let extra = state.seen.len() - KEEP_SEEN;
-                    state.seen.drain(..extra);
+                for list in [&mut state.seen, &mut state.episodes] {
+                    if list.len() > KEEP_SEEN {
+                        let extra = list.len() - KEEP_SEEN;
+                        list.drain(..extra);
+                    }
                 }
             }
             Err(e) => {
@@ -1228,6 +1302,8 @@ impl Worker {
             interfaces: self.interfaces.clone(),
             remote_on: self.remote_task.is_some(),
             remote_error: self.remote_error.clone(),
+            feed_preview: self.preview.clone(),
+            remote_fingerprint: self.remote_fingerprint.clone(),
         };
         let mut current = self.shared.lock().unwrap_or_else(|e| e.into_inner());
         if **current != snapshot {

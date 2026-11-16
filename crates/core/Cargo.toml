@@ -16,6 +16,10 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # Already part of the build through reqwest; used for hashing the remote-control password.
 aws-lc-rs = "1"
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+regex-lite = "0.1"
+# Already part of the build through reqwest; used for the optional HTTPS of the remote control.
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "aws_lc_rs"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["tls12", "aws_lc_rs"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

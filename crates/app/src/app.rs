@@ -111,6 +111,7 @@ struct SettingsDialog {
     /// The app macOS opens magnet links with, by its bundle identifier. Mac only.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     magnet_handler: Option<String>,
+    remote_https: bool,
 }
 
 /// Asks for the name of a new category or tag for some torrents.
@@ -174,6 +175,7 @@ impl SettingsDialog {
             magnet_handler: crate::mac::magnet_handler(),
             #[cfg(not(target_os = "macos"))]
             magnet_handler: None,
+            remote_https: s.remote.https,
         }
     }
 }
@@ -1266,6 +1268,7 @@ impl App {
                                 }),
                         );
                     });
+                    ui.checkbox(&mut dialog.remote_https, "Use HTTPS");
                 });
                 let typed = dialog.remote_password.chars().count();
                 let problem = if typed > 0 && typed < rusttorrent_core::remote::MIN_PASSWORD {
@@ -1282,7 +1285,8 @@ impl App {
                     ui.label(RichText::new(error).small().color(red));
                 } else if snap.remote_on {
                     let port = snap.settings.remote.port;
-                    let mut text = format!("On now. On this computer: http://localhost:{port}");
+                    let scheme = if snap.settings.remote.https { "https" } else { "http" };
+                    let mut text = format!("On now. On this computer: {scheme}://localhost:{port}");
                     if snap.settings.remote.lan {
                         let other = snap
                             .interfaces
@@ -1290,16 +1294,25 @@ impl App {
                             .flat_map(|i| &i.addrs)
                             .find(|a| a.parse::<std::net::Ipv4Addr>().is_ok_and(|ip| !ip.is_loopback()));
                         if let Some(addr) = other {
-                            text.push_str(&format!("   From a phone: http://{addr}:{port}"));
+                            text.push_str(&format!("   From a phone: {scheme}://{addr}:{port}"));
                         }
                     }
                     ui.label(RichText::new(text).small());
+                    if let Some(fingerprint) = &snap.remote_fingerprint {
+                        ui.label(RichText::new(format!("Certificate fingerprint (SHA-256): {fingerprint}")).small());
+                    }
                 }
                 ui.label(
-                    RichText::new(
-                        "The page can add, pause, resume and remove torrents and set speed limits. \
-                         It is not encrypted: allow other devices only on a network you trust.",
-                    )
+                    RichText::new(if dialog.remote_https {
+                        "The page can add torrents (also from a .torrent file), pause, resume and remove \
+                         them, choose their files and category, and set speed limits. With HTTPS it is \
+                         encrypted, but the certificate is made by this app, so the browser warns the \
+                         first time. Go on only if the fingerprint it shows matches the one here."
+                    } else {
+                        "The page can add torrents (also from a .torrent file), pause, resume and remove \
+                         them, choose their files and category, and set speed limits. Without HTTPS it is \
+                         not encrypted: allow other devices only on a network you trust."
+                    })
                     .small()
                     .weak(),
                 );
@@ -1377,6 +1390,9 @@ impl App {
                         password,
                     });
                 }
+                if dialog.remote_https != remote.https {
+                    core.send(Command::SetRemoteHttps(dialog.remote_https));
+                }
                 close = true;
             }
             if close || response.should_close() {
@@ -1453,6 +1469,7 @@ impl App {
                 );
                 ui.add_space(6.0);
                 let mut gone: Option<usize> = None;
+                let mut bad = false;
                 egui::ScrollArea::vertical().max_height(380.0).show(ui, |ui| {
                     if dialog.feeds.is_empty() {
                         ui.label(RichText::new("No feeds yet.").weak());
@@ -1491,7 +1508,10 @@ impl App {
                                         line(ui, "Must have", &mut feed.include, "words, separated by spaces");
                                         line(ui, "Must not have", &mut feed.exclude, "words, separated by spaces");
                                         line(ui, "Category", &mut dialog.categories[i], "none");
+                                        line(ui, "Episodes", &mut feed.episodes, "all, or like S02E05-");
                                     });
+                                crate::feed_ui::options(ui, feed);
+                                bad |= crate::feed_ui::problem(ui, feed);
                                 let state = snap.feeds.iter().find(|f| f.feed.url == feed.url.trim());
                                 let status = match state {
                                     None => RichText::new("Not saved yet").weak(),
@@ -1505,7 +1525,16 @@ impl App {
                                         .weak(),
                                     },
                                 };
-                                ui.add(egui::Label::new(status.small()).truncate());
+                                ui.horizontal(|ui| {
+                                    let url = feed.url.trim();
+                                    if ui
+                                        .add_enabled(!url.is_empty(), egui::Button::new("Preview").small())
+                                        .clicked()
+                                    {
+                                        core.send(Command::PreviewFeed(Some(url.to_owned())));
+                                    }
+                                    ui.add(egui::Label::new(status.small()).truncate());
+                                });
                             });
                         });
                     }
@@ -1513,6 +1542,21 @@ impl App {
                 if let Some(i) = gone {
                     dialog.feeds.remove(i);
                     dialog.categories.remove(i);
+                }
+                if let Some(preview) = &snap.feed_preview {
+                    let shown = dialog
+                        .feeds
+                        .iter()
+                        .zip(&dialog.categories)
+                        .find(|(f, _)| f.url.trim() == preview.url);
+                    let feed = shown.map(|(f, c)| Feed {
+                        category: Some(c.trim().to_owned()).filter(|c| !c.is_empty()),
+                        ..f.clone()
+                    });
+                    ui.add_space(6.0);
+                    if crate::feed_ui::preview(ui, core, preview, feed.as_ref()) {
+                        core.send(Command::PreviewFeed(None));
+                    }
                 }
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
@@ -1527,7 +1571,10 @@ impl App {
                         core.send(Command::CheckFeeds);
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button(RichText::new("Save").strong()).clicked() {
+                        if ui
+                            .add_enabled(!bad, egui::Button::new(RichText::new("Save").strong()))
+                            .clicked()
+                        {
                             save = true;
                         }
                         if ui.button("Cancel").clicked() {
@@ -1551,6 +1598,7 @@ impl App {
             }
             if close || response.should_close() {
                 self.feeds = None;
+                self.core.send(Command::PreviewFeed(None));
             }
         }
     }

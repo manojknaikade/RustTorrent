@@ -13,7 +13,14 @@
 //! - Everything but the page itself needs a session, which is given for the password and
 //!   kept in a cookie that browsers do not send along with requests from other sites.
 //!
-//! The server speaks plain HTTP, one request per connection. There is no encryption.
+//! The server speaks HTTP, one request per connection: plain, or inside TLS with a
+//! certificate the app makes for itself (see [`tls`]) when the user turns HTTPS on.
+//!
+//! A `.torrent` file can be sent from the page. Only a signed-in request from the page
+//! itself may send a body larger than a command, the body is read into memory only, up
+//! to [`MAX_UPLOAD`], and it is taken only if it reads as a torrent.
+pub(crate) mod tls;
+
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::num::NonZeroU32;
@@ -23,9 +30,10 @@ use std::time::{Duration, Instant};
 use aws_lc_rs::pbkdf2;
 use aws_lc_rs::rand::{SecureRandom, SystemRandom};
 use serde::Deserialize;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::TcpListener;
 use tokio::sync::mpsc::UnboundedSender;
+use tokio_rustls::TlsAcceptor;
 
 use crate::intake::{self, Source};
 use crate::model::Snapshot;
@@ -43,6 +51,11 @@ const SESSION_LIFE: Duration = Duration::from_secs(7 * 24 * 3600);
 const MAX_SESSIONS: usize = 16;
 const MAX_KEYS: usize = 1000;
 const COOKIE: &str = "rusttorrent";
+/// The largest `.torrent` file the page may send. Most are well under 1 MiB.
+pub(crate) const MAX_UPLOAD: usize = 4 * 1024 * 1024;
+/// More files than this in one choice is not a real request.
+const MAX_FILES: usize = 100_000;
+const MAX_CATEGORY: usize = 100;
 
 const PAGE: &str = include_str!("index.html");
 const SCRIPT: &str = include_str!("app.js");
@@ -109,6 +122,8 @@ struct Server {
     /// Session tokens and when each stops being valid.
     sessions: Mutex<HashMap<String, Instant>>,
     guard: Mutex<Guard>,
+    /// Requests arrive inside TLS.
+    https: bool,
 }
 
 /// Answers requests until the task is dropped. Sessions live only as long as it does, so
@@ -119,6 +134,7 @@ pub(crate) async fn serve(
     hash: Vec<u8>,
     shared: Shared,
     tx: UnboundedSender<Command>,
+    tls: Option<TlsAcceptor>,
 ) {
     let server = Arc::new(Server {
         salt,
@@ -130,6 +146,7 @@ pub(crate) async fn serve(
             failures: 0,
             locked_until: None,
         }),
+        https: tls.is_some(),
     });
     let mut connections = tokio::task::JoinSet::new();
     loop {
@@ -142,18 +159,28 @@ pub(crate) async fn serve(
             continue;
         }
         let server = server.clone();
+        let tls = tls.clone();
         connections.spawn(async move {
-            let _ = tokio::time::timeout(TIME_LIMIT, connection(&server, stream)).await;
+            let _ = tokio::time::timeout(TIME_LIMIT, async {
+                match tls {
+                    Some(tls) => match tls.accept(stream).await {
+                        Ok(stream) => connection(&server, stream).await,
+                        Err(_) => Ok(()),
+                    },
+                    None => connection(&server, stream).await,
+                }
+            })
+            .await;
         });
     }
 }
 
-async fn connection(server: &Server, mut stream: TcpStream) -> std::io::Result<()> {
-    let reply = match read_request(&mut stream).await {
+async fn connection<S: AsyncRead + AsyncWrite + Unpin>(server: &Server, mut stream: S) -> std::io::Result<()> {
+    let reply = match read_request(server, &mut stream).await {
         Ok(request) => server.answer(&request).await,
         Err(status) => Reply::error(status, "The request could not be read."),
     };
-    stream.write_all(&reply.into_bytes()).await?;
+    stream.write_all(&reply.into_bytes(server.https)).await?;
     stream.shutdown().await
 }
 
@@ -207,7 +234,8 @@ fn parse_head(head: &str) -> Result<(Request, usize), u16> {
         Some((_, v)) => v.parse::<usize>().map_err(|_| 400u16)?,
         None => 0,
     };
-    if length > MAX_BODY {
+    // Anything over a command's size is only read for an upload; see `read_request`.
+    if length > MAX_UPLOAD {
         return Err(413);
     }
     let request = Request {
@@ -219,7 +247,7 @@ fn parse_head(head: &str) -> Result<(Request, usize), u16> {
     Ok((request, length))
 }
 
-async fn read_request(stream: &mut TcpStream) -> Result<Request, u16> {
+async fn read_request<S: AsyncRead + AsyncWrite + Unpin>(server: &Server, stream: &mut S) -> Result<Request, u16> {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 2048];
     let end = loop {
@@ -236,6 +264,25 @@ async fn read_request(stream: &mut TcpStream) -> Result<Request, u16> {
     };
     let head = std::str::from_utf8(&buf[..end]).map_err(|_| 400u16)?;
     let (mut request, length) = parse_head(head)?;
+    if length > MAX_BODY {
+        // Checked before a byte of it is read, so nobody else can make the app hold
+        // megabytes in memory.
+        if !(request.method == "POST" && request.path == "/api/upload")
+            || server.gate(&request).is_err()
+            || !server.signed_in(&request)
+        {
+            return Err(413);
+        }
+        if request
+            .header("expect")
+            .is_some_and(|e| e.eq_ignore_ascii_case("100-continue"))
+        {
+            stream
+                .write_all(b"HTTP/1.1 100 Continue\r\n\r\n")
+                .await
+                .map_err(|_| 400u16)?;
+        }
+    }
     let mut body = buf[end + 4..].to_vec();
     while body.len() < length {
         match stream.read(&mut chunk).await {
@@ -301,7 +348,8 @@ impl Reply {
         Self::json(status, serde_json::json!({ "error": text }))
     }
 
-    fn into_bytes(self) -> Vec<u8> {
+    /// `secure` marks the cookie as one for HTTPS only.
+    fn into_bytes(self, secure: bool) -> Vec<u8> {
         let reason = match self.status {
             200 => "OK",
             400 => "Bad Request",
@@ -329,8 +377,9 @@ impl Reply {
         );
         if let Some(token) = &self.cookie {
             let age = if token.is_empty() { 0 } else { SESSION_LIFE.as_secs() };
+            let secure = if secure { "; Secure" } else { "" };
             head.push_str(&format!(
-                "Set-Cookie: {COOKIE}={token}; Path=/; Max-Age={age}; HttpOnly; SameSite=Strict\r\n"
+                "Set-Cookie: {COOKIE}={token}; Path=/; Max-Age={age}; HttpOnly; SameSite=Strict{secure}\r\n"
             ));
         }
         head.push_str("\r\n");
@@ -363,6 +412,15 @@ enum Ask {
         down_kib: u32,
         up_kib: u32,
     },
+    /// Which files of one torrent to download, by their place in its list.
+    Files {
+        key: String,
+        files: Vec<usize>,
+    },
+    Category {
+        keys: Vec<String>,
+        category: Option<String>,
+    },
 }
 
 impl Ask {
@@ -387,6 +445,24 @@ impl Ask {
                 delete_files,
             },
             Ask::Limits { down_kib, up_kib } => Command::SetLimits { down_kib, up_kib },
+            Ask::Files { key, files } => {
+                if files.len() > MAX_FILES {
+                    return Err("Too many files at once.");
+                }
+                if files.is_empty() {
+                    return Err("Choose at least one file.");
+                }
+                Command::SetFiles { key, files }
+            }
+            Ask::Category { keys, category } => {
+                if category.as_ref().is_some_and(|c| c.chars().count() > MAX_CATEGORY) {
+                    return Err("That category name is too long.");
+                }
+                Command::SetCategory {
+                    keys: checked(keys)?,
+                    category,
+                }
+            }
         })
     }
 }
@@ -409,9 +485,21 @@ fn state_json(snap: &Snapshot) -> serde_json::Value {
                 "peers": t.peers_live,
                 "category": t.category,
                 "queue_pos": t.queue_pos,
+                "ratio": crate::format::ratio(t.uploaded, t.done),
+                "eta": crate::format::eta(t.total.saturating_sub(t.done), t.down_bps),
+                "peers_seen": t.peers_seen,
+                "files": t.files.len(),
             })
         })
         .collect();
+    let mut categories: Vec<&String> = snap
+        .torrents
+        .iter()
+        .filter_map(|t| t.category.as_ref())
+        .chain(snap.feeds.iter().filter_map(|f| f.feed.category.as_ref()))
+        .collect();
+    categories.sort();
+    categories.dedup();
     let notices: Vec<serde_json::Value> = snap
         .notices
         .iter()
@@ -429,7 +517,31 @@ fn state_json(snap: &Snapshot) -> serde_json::Value {
         "schedule_off": snap.schedule_off,
         "torrents": torrents,
         "notices": notices,
+        "categories": categories,
     })
+}
+
+/// The files of one torrent, for choosing which to download.
+fn files_json(t: &crate::model::TorrentView) -> serde_json::Value {
+    let files: Vec<serde_json::Value> = t
+        .files
+        .iter()
+        .enumerate()
+        .map(|(i, f)| {
+            serde_json::json!({
+                "name": f.name,
+                "len": f.len,
+                "done": t.file_done.get(i).copied().unwrap_or(0),
+                "chosen": t.selected.as_ref().is_none_or(|s| s.contains(&i)),
+            })
+        })
+        .collect();
+    serde_json::json!({ "key": t.key, "name": t.name, "files": files })
+}
+
+/// The info-hash a torrent is known by: 40 hex digits.
+fn is_key(text: &str) -> bool {
+    text.len() == 40 && text.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 impl Server {
@@ -491,20 +603,47 @@ impl Server {
         }
     }
 
-    async fn answer(&self, request: &Request) -> Reply {
+    /// The host and origin checks every request has to pass, sessions aside.
+    fn gate(&self, request: &Request) -> Result<(), Reply> {
         let Some(host) = request.header("host").filter(|h| host_allowed(h)) else {
-            return Reply::error(
+            return Err(Reply::error(
                 403,
                 "Open this page by the computer's IP address, by localhost or by its .local name.",
-            );
+            ));
         };
         if request.method == "POST" {
+            let scheme = if self.https { "https" } else { "http" };
             let same_site = request
                 .header("origin")
-                .is_none_or(|origin| origin.eq_ignore_ascii_case(&format!("http://{host}")));
+                .is_none_or(|origin| origin.eq_ignore_ascii_case(&format!("{scheme}://{host}")));
             if request.header("x-rusttorrent") != Some("1") || !same_site {
-                return Reply::error(403, "This request did not come from the RustTorrent page.");
+                return Err(Reply::error(
+                    403,
+                    "This request did not come from the RustTorrent page.",
+                ));
             }
+        }
+        Ok(())
+    }
+
+    fn upload(&self, request: &Request) -> Reply {
+        let name = match librqbit::torrent_from_bytes(&request.body) {
+            Ok(t) => t
+                .info
+                .data
+                .name
+                .as_ref()
+                .map(|n| String::from_utf8_lossy(n.as_ref()).into_owned())
+                .unwrap_or_else(|| t.info_hash.as_string()),
+            Err(_) => return Reply::error(400, "This file is not a torrent."),
+        };
+        let _ = self.tx.send(Command::AddTorrentBytes(request.body.clone()));
+        Reply::json(200, serde_json::json!({ "ok": true, "name": name }))
+    }
+
+    async fn answer(&self, request: &Request) -> Reply {
+        if let Err(reply) = self.gate(request) {
+            return reply;
         }
         match (request.method.as_str(), request.path.as_str()) {
             ("GET", "/") => Reply::file("text/html; charset=utf-8", PAGE),
@@ -520,8 +659,18 @@ impl Server {
                     ..Reply::ok()
                 }
             }
-            ("GET", "/api/state") | ("POST", "/api/command") if !self.signed_in(request) => {
-                Reply::error(401, "Sign in first.")
+            (_, path) if path.starts_with("/api/") && !self.signed_in(request) => Reply::error(401, "Sign in first."),
+            ("POST", "/api/upload") => self.upload(request),
+            ("GET", path) if path.starts_with("/api/files/") => {
+                let key = &path["/api/files/".len()..];
+                if !is_key(key) {
+                    return Reply::error(404, "There is nothing at this address.");
+                }
+                let snap = self.shared.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                match snap.torrents.iter().find(|t| t.key.eq_ignore_ascii_case(key)) {
+                    Some(t) => Reply::json(200, files_json(t)),
+                    None => Reply::error(404, "That torrent is not in the list."),
+                }
             }
             ("GET", "/api/state") => {
                 let snap = self.shared.lock().unwrap_or_else(|e| e.into_inner()).clone();
@@ -596,7 +745,8 @@ mod tests {
             Err(400)
         );
         assert_eq!(parse_head("POST / HTTP/1.1\r\nTransfer-Encoding: chunked"), Err(400));
-        assert_eq!(parse_head("POST / HTTP/1.1\r\nContent-Length: 999999"), Err(413));
+        assert!(parse_head("POST / HTTP/1.1\r\nContent-Length: 999999").is_ok());
+        assert_eq!(parse_head("POST / HTTP/1.1\r\nContent-Length: 99999999"), Err(413));
         assert_eq!(parse_head("GET http://x/ HTTP/1.1"), Err(400));
         assert_eq!(parse_head("nonsense"), Err(400));
     }
@@ -628,13 +778,24 @@ mod tests {
                 up_kib: 0
             })
         ));
+        assert!(matches!(
+            ask(r#"{"do":"files","key":"a","files":[0,2]}"#),
+            Ok(Command::SetFiles { files, .. }) if files == [0, 2]
+        ));
+        assert!(ask(r#"{"do":"files","key":"a","files":[]}"#).is_err());
+        assert!(matches!(
+            ask(r#"{"do":"category","keys":["a"],"category":null}"#),
+            Ok(Command::SetCategory { category: None, .. })
+        ));
+        let long = format!(r#"{{"do":"category","keys":["a"],"category":"{}"}}"#, "x".repeat(101));
+        assert!(ask(&long).is_err());
         // Not one of the things the remote may do.
         assert!(ask(r#"{"do":"set_interface","name":"en0"}"#).is_err());
     }
 
     /// Sends one request to a running server and returns the status, head and body.
     async fn send(port: u16, text: String) -> (u16, String, String) {
-        let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
         stream.write_all(text.as_bytes()).await.unwrap();
         let mut out = String::new();
         stream.read_to_string(&mut out).await.unwrap();
@@ -663,6 +824,7 @@ mod tests {
             unhex(&hash).unwrap(),
             shared,
             tx,
+            None,
         ));
         let ours = "X-RustTorrent: 1\r\n";
 
@@ -713,6 +875,33 @@ mod tests {
         // The cookie alone, as another site's form would send it, is not enough.
         assert_eq!(send(port, post(port, "/api/command", &signed, pause)).await.0, 403);
         assert!(rx.try_recv().is_err());
+
+        // A torrent file can be sent; anything else is turned away.
+        let torrent = "d4:infod6:lengthi1e4:name5:a.txt12:piece lengthi16384e6:pieces20:aaaaaaaaaaaaaaaaaaaaee";
+        let (status, _, body) = send(port, post(port, "/api/upload", &both, torrent)).await;
+        assert_eq!(status, 200, "{body}");
+        assert!(body.contains("a.txt"));
+        assert!(matches!(rx.try_recv(), Ok(Command::AddTorrentBytes(b)) if b == torrent.as_bytes()));
+        let (status, _, body) = send(port, post(port, "/api/upload", &both, "hello")).await;
+        assert_eq!(status, 400);
+        assert!(body.contains("not a torrent"));
+        assert_eq!(send(port, post(port, "/api/upload", ours, torrent)).await.0, 401);
+        assert!(rx.try_recv().is_err());
+        // A large body is refused before it is read unless the request is signed in.
+        let big =
+            format!("POST /api/upload HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{ours}Content-Length: 100000\r\n\r\n");
+        assert_eq!(send(port, big).await.0, 413);
+        let large =
+            format!("POST /api/command HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{both}Content-Length: 100000\r\n\r\n");
+        assert_eq!(send(port, large).await.0, 413);
+        // Files of a torrent not in the list, and an address that is not a key.
+        let files = format!(
+            "GET /api/files/{} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{signed}\r\n",
+            "a".repeat(40)
+        );
+        assert_eq!(send(port, files).await.0, 404);
+        let files = format!("GET /api/files/../x HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{signed}\r\n");
+        assert_eq!(send(port, files).await.0, 404);
 
         // Signing out ends the session.
         assert_eq!(send(port, post(port, "/api/logout", &both, "")).await.0, 200);

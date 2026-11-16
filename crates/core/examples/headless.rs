@@ -29,6 +29,10 @@ fn main() {
             lan: false,
             password: Some(password.to_owned()),
         });
+        // RUSTTORRENT_REMOTE_HTTPS=1 serves it over HTTPS.
+        if std::env::var_os("RUSTTORRENT_REMOTE_HTTPS").is_some() {
+            core.send(Command::SetRemoteHttps(true));
+        }
     }
     let start = Instant::now();
     loop {

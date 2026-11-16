@@ -3,6 +3,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod app;
+mod feed_ui;
 #[cfg(target_os = "macos")]
 mod mac;
 

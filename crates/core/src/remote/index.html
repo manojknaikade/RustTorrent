@@ -33,6 +33,7 @@
            aria-label="Magnet link or web address of a .torrent file" autocomplete="off" required>
     <button class="primary">Add</button>
   </form>
+  <label class="upload"><input id="upload" type="file" accept=".torrent,application/x-bittorrent"> Or send a .torrent file from this device</label>
   <p id="message" class="muted" role="status"></p>
 
   <ul id="list"></ul>
@@ -59,6 +60,32 @@
     <div class="row end">
       <button value="cancel">Cancel</button>
       <button value="remove" class="danger">Remove</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="files-dialog">
+  <form method="dialog">
+    <h2>Choose files</h2>
+    <p id="files-name" class="muted"></p>
+    <div id="files-list" class="files"></div>
+    <div class="row end">
+      <button value="cancel">Cancel</button>
+      <button value="save" class="primary">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="category-dialog">
+  <form method="dialog">
+    <h2>Category</h2>
+    <p id="category-name" class="muted"></p>
+    <input id="category-text" type="text" list="category-known" maxlength="100" autocomplete="off"
+           aria-label="Category" placeholder="None">
+    <datalist id="category-known"></datalist>
+    <div class="row end">
+      <button value="cancel">Cancel</button>
+      <button value="save" class="primary">Save</button>
     </div>
   </form>
 </dialog>
