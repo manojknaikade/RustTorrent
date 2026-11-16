@@ -1,7 +1,7 @@
 # What qBittorrent has that RustTorrent lacks
 
-* **Date:** 2026-11-15
-* **Compared:** RustTorrent 0.6 against qBittorrent 5.x, from qBittorrent's documented feature list. qBittorrent was not installed for this comparison.
+* **Date:** 2026-11-15, updated 2026-11-16 for 0.12
+* **Compared:** RustTorrent 0.12 against qBittorrent 5.x, from qBittorrent's documented feature list. qBittorrent was not installed for this comparison.
 
 "Engine" below means [librqbit](https://github.com/ikatson/rqbit) 9.1, the library that does the transfers. Where a row says "engine check", the engine's source mentions the ability but nobody has yet tried it from RustTorrent. Where it says "engine lacks it", the feature needs a change inside the engine or a different engine.
 
@@ -9,26 +9,28 @@
 
 Magnet links and `.torrent` files, pause/resume/remove, choosing files, global speed limits, download queue, ratio limit, time-of-day schedule, categories and tags, watch folder, RSS auto-download, network interface binding, remote control from a browser, DHT, peer exchange, automatic port forwarding (UPnP), resume after restart, search and status filters, peers and trackers views.
 
-Better than qBittorrent today: in-order download is always on and works; all details are in the main window; the app is 16 MB and installs with one Homebrew command on Apple Silicon.
+Better than qBittorrent today: in-order download is always on and works; all details are in the main window; the app is 17 MB and installs with one Homebrew command on Apple Silicon.
 
-## Missing
+## Row by row
+
+The tables were first written against 0.6. A row now says which release closed it.
 
 ### Adding and managing torrents
 
 | qBittorrent feature | RustTorrent | Note |
 | --- | --- | --- |
-| Add dialog: choose folder, category, files and "start paused" before the download begins | Missing | Files can be chosen only after adding |
-| Move a torrent's data to another folder | Missing | Engine check |
-| Folder per category | Missing | |
+| Add dialog: choose folder, category, files and "start paused" before the download begins | Has it (0.7) |  |
+| Move a torrent's data to another folder | Missing | Engine lacks it |
+| Folder per category | Has it (0.7) |  |
 | Separate folder for unfinished downloads | Missing | |
-| Force recheck of downloaded data | Missing | Engine check |
-| Force reannounce to trackers | Missing | Engine check |
-| Force start (ignore the queue) | Missing | |
+| Force recheck of downloaded data | Missing | Engine lacks it |
+| Force reannounce to trackers | Missing | Engine lacks it |
+| Force start (ignore the queue) | Has it (0.7) |  |
 | Rename a torrent or its files | Missing | Engine lacks it |
-| Copy magnet link, info-hash, name | Missing | |
-| Save a torrent as a `.torrent` file | Missing | |
+| Copy magnet link, info-hash, name | Has it (0.7) |  |
+| Save a torrent as a `.torrent` file | Has it (0.12) |  |
 | Add, edit or remove a torrent's trackers | Missing | Engine lacks it |
-| Create a `.torrent` from a file or folder | Missing | Engine check |
+| Create a `.torrent` from a file or folder | Has it (0.12) | Trackers in tiers, piece size, comment, private, start seeding |
 | Delete the `.torrent` file after adding | Partly | Watch folder renames it instead |
 | Several watch folders, each with its own options | Missing | One folder |
 
@@ -44,24 +46,24 @@ Better than qBittorrent today: in-order download is always on and works; all det
 
 | qBittorrent feature | RustTorrent | Note |
 | --- | --- | --- |
-| Second set of speed limits with a quick switch, and a schedule for it | Missing | The schedule today is all-or-nothing |
-| Speed limit per torrent | Missing | Engine check |
-| Stop seeding after a time, or after a time without upload | Missing | |
-| Limit on seeding torrents and on all active torrents | Missing | Only downloads are limited |
-| Do not count slow torrents against the queue | Missing | |
-| Limits on connections and upload slots | Missing | Engine check |
+| Second set of speed limits with a quick switch, and a schedule for it | Has it (0.8) | "Slow mode", switched from the status bar or by its schedule |
+| Speed limit per torrent | Missing | Engine lacks it |
+| Stop seeding after a time, or after a time without upload | Has it (0.8) |  |
+| Limit on seeding torrents and on all active torrents | Has it (0.8) |  |
+| Do not count slow torrents against the queue | Has it (0.8) |  |
+| Limits on connections and upload slots | Partly (0.8) | Peers per torrent only; engine lacks the rest |
 
 ### Network and privacy
 
 | qBittorrent feature | RustTorrent | Note |
 | --- | --- | --- |
-| Choose the listening port; switch UPnP, DHT, peer exchange on or off | Missing | Engine check; all are on with defaults today |
-| Proxy (SOCKS5, HTTP) | Missing | Engine check |
-| IP block list | Missing | Engine check |
-| Ban a peer, add a peer by hand | Missing | |
+| Choose the listening port; switch UPnP, DHT, peer exchange on or off | Partly (0.9) | Port, UPnP and DHT; the engine has no switch for peer exchange. A change restarts the engine |
+| Proxy (SOCKS5, HTTP) | Partly (0.9) | SOCKS5 only. Its password is kept as plain text in the settings file |
+| IP block list | Has it (0.9) | Read when the engine starts |
+| Ban a peer, add a peer by hand | Partly (0.9) | Ban only; engine lacks adding a peer |
 | Protocol encryption setting | Missing | Engine lacks it |
 | Anonymous mode | Missing | Engine lacks it |
-| Local peer discovery | Missing | Engine lacks it |
+| Local peer discovery | Has it (0.9) |  |
 | Web seeds (HTTP sources) | Missing | Engine lacks it |
 | BitTorrent v2 torrents | Missing | Engine lacks it |
 | Super seeding | Missing | Engine lacks it |
@@ -71,52 +73,52 @@ Better than qBittorrent today: in-order download is always on and works; all det
 
 | qBittorrent feature | RustTorrent | Note |
 | --- | --- | --- |
-| Notification when a download finishes | Missing | |
-| Keep the Mac awake while transferring | Missing | |
-| Speed graph | Missing | |
-| Piece map and availability bar | Missing | |
-| All-time statistics | Missing | |
-| Log viewer in the app | Missing | The log is a file |
-| Run a program when a download finishes | Missing | |
-| Shut down or sleep when all downloads finish | Missing | |
+| Notification when a download finishes | Has it (0.10) | Not seen working: macOS refused permission to the locally signed app on the test Mac |
+| Keep the Mac awake while transferring | Has it (0.10) | Not confirmed by measurement |
+| Speed graph | Has it (0.10) |  |
+| Piece map and availability bar | Partly (0.10) | Piece map; engine lacks per-piece availability |
+| All-time statistics | Has it (0.10) |  |
+| Log viewer in the app | Has it (0.10) |  |
+| Run a program when a download finishes | Has it (0.10) | Run directly, not through a shell |
+| Shut down or sleep when all downloads finish | Partly (0.10) | Can quit the app; does not shut down or sleep the Mac |
 | Peer's country and client flags | Partly | Client name is shown |
-| Filter the list by tracker | Missing | |
-| Choose which columns are shown | Missing | |
-| Menu-bar icon; keep running with the window closed | Missing | |
-| Warn when quitting during downloads | Missing | |
+| Filter the list by tracker | Has it (0.10) |  |
+| Choose which columns are shown | Has it (0.10) |  |
+| Menu-bar icon; keep running with the window closed | Missing | Left out of 0.10 |
+| Warn when quitting during downloads | Has it (0.7) |  |
 | Languages other than English | Missing | Not planned yet |
-| Light theme | Missing | Dark only |
+| Light theme | Has it (0.10) |  |
 | Check for a new version | Not needed | `brew upgrade` does it |
 
 ### RSS and remote control
 
 | qBittorrent feature | RustTorrent | Note |
 | --- | --- | --- |
-| RSS rules with regular expressions and episode filters ("S02E05 and later") | Missing | Word lists only |
-| RSS: read articles in the app, smart episode filter (skip repeats) | Missing | |
-| Remote: everything the desktop window can do | Partly | Add link, pause, resume, remove, limits |
-| Remote: upload a `.torrent` file | Missing | |
-| Remote: HTTPS | Missing | Unencrypted today |
-| Remote: API that other apps (phone apps, Sonarr, Radarr) can use | Missing | qBittorrent's API is widely supported |
+| RSS rules with regular expressions and episode filters ("S02E05 and later") | Has it (0.11) |  |
+| RSS: read articles in the app, smart episode filter (skip repeats) | Has it (0.11) | Preview of a feed's items with a Download button each; repeats of an episode are skipped |
+| Remote: everything the desktop window can do | Partly | Add link or file, pause, resume, remove, files, category, main speed limits |
+| Remote: upload a `.torrent` file | Has it (0.11) |  |
+| Remote: HTTPS | Has it (0.11) | Self-made certificate, so the browser warns once |
+| Remote: API that other apps (phone apps, Sonarr, Radarr) can use | Missing | Left out of 0.11 |
 | Search engine with plugins | Not planned | Plugins were ruled out |
 | Email on completion, lock the window with a password | Not planned | |
 
-## Plan
+## What 0.7 to 0.12 did
 
-Ordered by how often the missing piece is felt in daily use, and by risk: things that need only RustTorrent's own code come first; things that need an engine check come with a fallback; things the engine lacks come last.
+The six releases planned here were built together and published as one, 0.12.0.
 
-**0.7, managing torrents.** Add dialog (folder, category, files, start paused). Copy magnet link, hash and name. Force start. Folder per category. Folder for unfinished downloads. Force recheck and reannounce, and move data, if the engine checks pass; otherwise move data is done by pausing, moving the files and re-adding. Warn when quitting during downloads.
+**Built.** Everything marked "Has it" or "Partly" with a release number in the tables above.
 
-**0.8, limits.** Second set of speed limits with a toolbar switch and its own schedule. Seeding time limits. Limits on seeding and on all active torrents. Per-torrent speed limits and connection limits if the engine checks pass.
+**Planned but left out.**
 
-**0.9, network.** Listening port; switches for UPnP, DHT and peer exchange; SOCKS5 proxy; IP block list. Each depends on an engine check. Bind the remote-control page to the chosen interface too.
+- Menu-bar icon and running with the window closed (0.10).
+- A copy of qBittorrent's API for phone apps and other tools (0.11).
+- A separate folder for unfinished downloads (0.7).
+- Binding the remote-control page to the chosen network interface (0.9).
+- The remote page cannot see or set slow mode, the seeding limits or the queue limits.
 
-**0.10, feedback.** Finish notification. Keep the Mac awake while transferring. Speed graph. Piece map. Log viewer. Statistics. Tracker filter. Column chooser. Menu-bar icon. Light theme.
+**The engine checks failed for these**, so they are not built and are not faked: moving data, force recheck, force reannounce, per-torrent speed limits, upload slots, a peer-exchange switch, adding a peer by hand, per-piece availability.
 
-**0.11, RSS and remote.** Regular expressions and episode filters in feed rules. Remote page: `.torrent` upload, file choice, categories, HTTPS with a self-made certificate. Decide then whether to copy qBittorrent's API so that existing phone apps work.
+**Still needs an engine change.** A switch for in-order download, file priorities, tracker editing, renaming, encryption setting, web seeds, BitTorrent v2, super seeding, and the list above. The route is to propose each change to librqbit, or to keep a patched copy. The in-order switch and file priorities are the two most asked for in other clients.
 
-**0.12, making torrents.** Create a `.torrent` from a file or folder; save a torrent as a `.torrent` file.
-
-**Needs an engine change (no release assigned).** A switch for in-order download, file priorities, tracker editing, renaming, encryption setting, local peer discovery, web seeds, BitTorrent v2, super seeding. The route is to propose each change to librqbit, or to keep a patched copy. Before 0.9, decide which of these matter enough to justify that work; the in-order switch and file priorities are the two most asked for in other clients.
-
-**Size.** The app is 1 MB over its 15 MB target, and every release above adds code. The speed graph and piece map are drawn with the existing drawing library and add little; HTTPS for the remote page reuses the encryption library already included.
+**Size.** The app is now 17 MB, 2 MB over its 15 MB target.

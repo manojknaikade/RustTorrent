@@ -2169,7 +2169,9 @@ fn shot(ctx: &egui::Context) {
         .and_then(|s| s.parse().ok())
         .unwrap_or(4.0);
     let elapsed = START.get_or_init(std::time::Instant::now).elapsed().as_secs_f32();
+    // Keep drawing: the picture is taken on the frame after it is asked for.
     if DONE.load(Ordering::Relaxed) {
+        ctx.request_repaint_after(std::time::Duration::from_millis(100));
         return;
     }
     if elapsed < wait {

@@ -279,6 +279,9 @@ $("upload").addEventListener("change", async () => {
   }
 });
 
+// Cancel is not a submit button, so that Enter in the box saves.
+$("category-cancel").addEventListener("click", () => $("category-dialog").close("cancel"));
+
 $("limits-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const number = (id) => Math.max(0, Math.floor(Number($(id).value) || 0));
