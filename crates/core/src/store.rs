@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::arbiter::Intent;
 use crate::feeds::Feed;
+use crate::limits::{LimitSettings, Seeding};
 use crate::rules::Schedule;
 
 pub const SCHEMA_VERSION: u32 = 1;
@@ -40,6 +41,8 @@ pub struct Settings {
     pub ask_before_add: bool,
     /// The folder each category saves to, by category name. Others use `download_dir`.
     pub category_dirs: BTreeMap<String, PathBuf>,
+    /// Slow mode, seeding time limits, queue limits and peers per torrent.
+    pub limits: LimitSettings,
 }
 
 /// Remote control from a browser. Off until the user turns it on and sets a password.
@@ -91,6 +94,7 @@ impl Default for Settings {
             remote: RemoteSettings::default(),
             ask_before_add: true,
             category_dirs: BTreeMap::new(),
+            limits: LimitSettings::default(),
         }
     }
 }
@@ -121,6 +125,8 @@ pub struct Record {
     /// Downloads even when the queue is full. The schedule and the network interface
     /// still apply.
     pub force_start: bool,
+    /// How long it has seeded, and its own seeding time limits.
+    pub seeding: Seeding,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
@@ -289,6 +295,12 @@ mod tests {
                 done: 60,
                 finished: false,
                 force_start: true,
+                seeding: Seeding {
+                    time_limit_min: Some(30),
+                    idle_limit_min: None,
+                    secs: 90,
+                    idle_secs: 12,
+                },
             },
         );
         store.save().unwrap();

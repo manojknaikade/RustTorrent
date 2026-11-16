@@ -6,6 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::arbiter::{Holds, Intent};
+use crate::limits::{SeedStop, Seeding, SlowMode, SlowReason};
 use crate::store::Settings;
 
 /// When transfers are allowed. Outside the window every torrent is held.
@@ -77,6 +78,10 @@ pub struct Item {
     pub added_at: u64,
     /// This torrent's own ratio limit in percent, if it has one. 0 means no limit.
     pub ratio_limit_pct: Option<u32>,
+    /// Seeding time so far and this torrent's own seeding time limits.
+    pub seeding: Seeding,
+    /// Slower than the slow-torrent speeds for a while.
+    pub slow: bool,
     /// Never held by the queue and does not use a slot. The schedule still holds it.
     pub force_start: bool,
 }
@@ -86,6 +91,9 @@ pub struct Outcome {
     pub holds: Holds,
     /// Place in the download queue, from 1. `None` once the torrent is finished.
     pub queue_pos: Option<u32>,
+    /// The seeding limit that was reached, if one was. It holds the torrent as a ratio
+    /// limit does.
+    pub seed_stop: Option<SeedStop>,
 }
 
 /// The unfinished torrents in queue order, as indexes into `items`.
@@ -108,14 +116,15 @@ pub fn apply(items: &[Item], settings: &Settings, now: Clock) -> Vec<Outcome> {
     let mut out: Vec<Outcome> = items
         .iter()
         .map(|t| {
-            let limit = t.ratio_limit_pct.unwrap_or(settings.ratio_limit_pct);
+            let stop = seed_stop(t, settings);
             Outcome {
                 holds: Holds {
                     schedule,
-                    ratio: t.finished && ratio_reached(t.done, t.uploaded, limit),
+                    ratio: stop.is_some(),
                     ..Default::default()
                 },
                 queue_pos: None,
+                seed_stop: stop,
             }
         })
         .collect();
@@ -124,6 +133,8 @@ pub fn apply(items: &[Item], settings: &Settings, now: Clock) -> Vec<Outcome> {
         0 => usize::MAX,
         n => n as usize,
     };
+    let limits = &settings.limits;
+    let mut active = slots(limits.max_active);
     for (place, i) in queue(items).into_iter().enumerate() {
         out[i].queue_pos = Some(place as u32 + 1);
         let t = &items[i];
@@ -131,17 +142,124 @@ pub fn apply(items: &[Item], settings: &Settings, now: Clock) -> Vec<Outcome> {
         if t.intent != Intent::Run || !t.settled {
             continue;
         }
+        if t.slow && limits.ignore_slow {
+            continue;
+        }
         // Forced torrents keep their place too, and download beside the queue.
         if t.force_start {
             continue;
         }
-        if free > 0 {
+        if free > 0 && active > 0 {
             free -= 1;
+            active -= 1;
+        } else {
+            out[i].holds.queue = true;
+        }
+    }
+    // Seeding torrents get what slots are left, in the same order.
+    let mut seeding = slots(limits.max_seeding);
+    for i in seeds(items) {
+        let t = &items[i];
+        if t.intent != Intent::Run || !t.settled || out[i].holds.ratio || (t.slow && limits.ignore_slow) {
+            continue;
+        }
+        if seeding > 0 && active > 0 {
+            seeding -= 1;
+            active -= 1;
         } else {
             out[i].holds.queue = true;
         }
     }
     out
+}
+
+fn slots(limit: u32) -> usize {
+    match limit {
+        0 => usize::MAX,
+        n => n as usize,
+    }
+}
+
+/// The finished torrents in queue order, as indexes into `items`.
+fn seeds(items: &[Item]) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..items.len()).filter(|&i| items[i].finished).collect();
+    order.sort_by(|&a, &b| {
+        let (a, b) = (&items[a], &items[b]);
+        (a.queue_pos, a.added_at, &a.key).cmp(&(b.queue_pos, b.added_at, &b.key))
+    });
+    order
+}
+
+/// The seeding limit a finished torrent has reached, if any. Its own limits win over the
+/// ones in the settings.
+pub fn seed_stop(t: &Item, settings: &Settings) -> Option<SeedStop> {
+    if !t.finished {
+        return None;
+    }
+    let ratio = t.ratio_limit_pct.unwrap_or(settings.ratio_limit_pct);
+    let time = t.seeding.time_limit_min.unwrap_or(settings.limits.seed_time_min);
+    let idle = t.seeding.idle_limit_min.unwrap_or(settings.limits.seed_idle_min);
+    let past = |secs: u64, min: u32| min > 0 && secs >= min as u64 * 60;
+    if ratio_reached(t.done, t.uploaded, ratio) {
+        Some(SeedStop::Ratio)
+    } else if past(t.seeding.secs, time) {
+        Some(SeedStop::Time)
+    } else if past(t.seeding.idle_secs, idle) {
+        Some(SeedStop::Idle)
+    } else {
+        None
+    }
+}
+
+/// Counts `secs` more seconds of seeding. `uploaded` says whether anything went out in
+/// that time.
+pub fn seed_tick(s: &mut Seeding, secs: u64, uploaded: bool) {
+    s.secs = s.secs.saturating_add(secs);
+    s.idle_secs = if uploaded { 0 } else { s.idle_secs.saturating_add(secs) };
+}
+
+/// Inside slow mode's own scheduled time.
+fn slow_window(s: &SlowMode, now: Clock) -> bool {
+    s.schedule.enabled && s.schedule.allows(now)
+}
+
+/// Whether slow mode is on now, and why.
+pub fn slow_mode(s: &SlowMode, now: Clock) -> Option<SlowReason> {
+    if s.on {
+        Some(SlowReason::Hand)
+    } else if slow_window(s, now) && !s.skipped {
+        Some(SlowReason::Schedule)
+    } else {
+        None
+    }
+}
+
+/// Turns slow mode on or off by hand. Turning it off while its schedule has it on keeps
+/// it off until that scheduled time ends.
+pub fn set_slow_mode(s: &mut SlowMode, on: bool, now: Clock) {
+    s.on = on;
+    if !on {
+        s.skipped = slow_window(s, now);
+    }
+}
+
+/// Forgets a skipped scheduled time once it is over. True if anything changed.
+pub fn slow_mode_tick(s: &mut SlowMode, now: Clock) -> bool {
+    let over = s.skipped && !slow_window(s, now);
+    if over {
+        s.skipped = false;
+    }
+    over
+}
+
+/// The download and upload limits in KiB/s that apply now (0 means no limit), and why
+/// slow mode is on if it is.
+pub fn speed_limits(settings: &Settings, now: Clock) -> (u32, u32, Option<SlowReason>) {
+    let slow = &settings.limits.slow;
+    match slow_mode(slow, now) {
+        Some(reason) => (slow.down_kib, slow.up_kib, Some(reason)),
+        None => (settings.down_limit_kib, settings.up_limit_kib, None),
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -201,6 +319,8 @@ mod tests {
             queue_pos: pos,
             added_at: 0,
             ratio_limit_pct: None,
+            seeding: Seeding::default(),
+            slow: false,
             force_start: false,
         }
     }
@@ -410,6 +530,215 @@ mod tests {
         done.finished = true;
         let items = [item("a", 1), done, item("c", 3)];
         assert_eq!(reorder(&items, &keys(&["c"]), Move::Up), keys(&["c", "a"]));
+    }
+
+    fn limited(limits: crate::limits::LimitSettings) -> Settings {
+        Settings {
+            limits,
+            ..Default::default()
+        }
+    }
+
+    fn seed(key: &str, pos: u64) -> Item {
+        let mut t = item(key, pos);
+        t.finished = true;
+        t.done = 1000;
+        t
+    }
+
+    #[test]
+    fn slow_mode_by_hand_and_by_schedule() {
+        let mut s = SlowMode {
+            schedule: Schedule {
+                enabled: true,
+                start_min: 9 * 60,
+                end_min: 17 * 60,
+                days: 0x7f,
+            },
+            ..Default::default()
+        };
+        assert_eq!(slow_mode(&s, at(0, 8, 0)), None);
+        assert_eq!(slow_mode(&s, NOON), Some(SlowReason::Schedule));
+        s.on = true;
+        assert_eq!(slow_mode(&s, at(0, 8, 0)), Some(SlowReason::Hand));
+        assert_eq!(slow_mode(&s, NOON), Some(SlowReason::Hand), "by hand is named first");
+        s.schedule.enabled = false;
+        s.on = false;
+        assert_eq!(slow_mode(&s, NOON), None, "a schedule that is off never turns it on");
+    }
+
+    #[test]
+    fn turning_slow_mode_off_skips_the_rest_of_its_scheduled_time() {
+        let mut s = SlowMode {
+            schedule: Schedule {
+                enabled: true,
+                start_min: 9 * 60,
+                end_min: 17 * 60,
+                days: 0x7f,
+            },
+            ..Default::default()
+        };
+        set_slow_mode(&mut s, false, NOON);
+        assert_eq!(slow_mode(&s, NOON), None);
+        assert!(!slow_mode_tick(&mut s, at(0, 16, 59)), "still inside the time");
+        assert_eq!(slow_mode(&s, at(0, 16, 59)), None);
+        assert!(slow_mode_tick(&mut s, at(0, 17, 0)), "the time is over");
+        assert_eq!(
+            slow_mode(&s, at(1, 9, 0)),
+            Some(SlowReason::Schedule),
+            "back the next day"
+        );
+        // Off by hand outside the scheduled time skips nothing.
+        set_slow_mode(&mut s, true, at(0, 20, 0));
+        set_slow_mode(&mut s, false, at(0, 20, 0));
+        assert!(!s.skipped);
+        assert_eq!(slow_mode(&s, at(1, 9, 0)), Some(SlowReason::Schedule));
+        // On by hand inside a skipped time turns it on.
+        set_slow_mode(&mut s, false, NOON);
+        set_slow_mode(&mut s, true, NOON);
+        assert_eq!(slow_mode(&s, NOON), Some(SlowReason::Hand));
+    }
+
+    #[test]
+    fn speed_limits_follow_slow_mode() {
+        let mut settings = Settings {
+            down_limit_kib: 5000,
+            up_limit_kib: 0,
+            ..Default::default()
+        };
+        settings.limits.slow.down_kib = 100;
+        settings.limits.slow.up_kib = 10;
+        assert_eq!(speed_limits(&settings, NOON), (5000, 0, None));
+        settings.limits.slow.on = true;
+        assert_eq!(speed_limits(&settings, NOON), (100, 10, Some(SlowReason::Hand)));
+    }
+
+    #[test]
+    fn slow_mode_and_the_all_or_nothing_schedule_work_side_by_side() {
+        let mut settings = Settings {
+            schedule: Schedule {
+                enabled: true,
+                start_min: 0,
+                end_min: 6 * 60,
+                days: 0x7f,
+            },
+            ..Default::default()
+        };
+        settings.limits.slow.schedule = Schedule {
+            enabled: true,
+            start_min: 0,
+            end_min: 0,
+            days: 0x7f,
+        };
+        let out = apply(&[item("a", 1)], &settings, NOON);
+        assert!(out[0].holds.schedule, "transfers are off at noon");
+        assert_eq!(speed_limits(&settings, NOON).2, Some(SlowReason::Schedule));
+        let out = apply(&[item("a", 1)], &settings, at(0, 3, 0));
+        assert!(!out[0].holds.schedule);
+    }
+
+    #[test]
+    fn seeding_time_limits() {
+        let mut settings = limited(crate::limits::LimitSettings {
+            seed_time_min: 60,
+            seed_idle_min: 10,
+            ..Default::default()
+        });
+        let mut t = seed("a", 1);
+        assert_eq!(seed_stop(&t, &settings), None);
+        t.seeding.secs = 3600;
+        assert_eq!(seed_stop(&t, &settings), Some(SeedStop::Time));
+        t.seeding.secs = 0;
+        t.seeding.idle_secs = 600;
+        assert_eq!(seed_stop(&t, &settings), Some(SeedStop::Idle));
+        t.seeding.idle_limit_min = Some(0);
+        assert_eq!(seed_stop(&t, &settings), None, "this torrent has no idle limit");
+        t.seeding.time_limit_min = Some(5);
+        t.seeding.secs = 300;
+        assert_eq!(seed_stop(&t, &settings), Some(SeedStop::Time), "own limit wins");
+        settings.ratio_limit_pct = 100;
+        t.uploaded = 1000;
+        assert_eq!(seed_stop(&t, &settings), Some(SeedStop::Ratio), "ratio is named first");
+        let out = apply(std::slice::from_ref(&t), &settings, NOON);
+        assert!(out[0].holds.ratio);
+        assert_eq!(out[0].seed_stop, Some(SeedStop::Ratio));
+        t.finished = false;
+        assert_eq!(seed_stop(&t, &settings), None, "still downloading");
+    }
+
+    #[test]
+    fn seed_tick_counts_time_and_idle_time() {
+        let mut s = Seeding::default();
+        seed_tick(&mut s, 5, false);
+        seed_tick(&mut s, 3, false);
+        assert_eq!((s.secs, s.idle_secs), (8, 8));
+        seed_tick(&mut s, 2, true);
+        assert_eq!((s.secs, s.idle_secs), (10, 0));
+        seed_tick(&mut s, 0, false);
+        assert_eq!((s.secs, s.idle_secs), (10, 0));
+    }
+
+    fn holds(items: &[Item], limits: crate::limits::LimitSettings, max_downloads: u32) -> Vec<bool> {
+        let settings = Settings {
+            max_downloads,
+            limits,
+            ..Default::default()
+        };
+        apply(items, &settings, NOON).iter().map(|o| o.holds.queue).collect()
+    }
+
+    #[test]
+    fn only_so_many_seed_at_once() {
+        let limits = crate::limits::LimitSettings {
+            max_seeding: 2,
+            ..Default::default()
+        };
+        let mut paused = seed("b", 2);
+        paused.intent = Intent::Pause;
+        let items = [seed("c", 4), seed("a", 1), paused, seed("d", 3), item("x", 5)];
+        assert_eq!(holds(&items, limits, 0), [true, false, false, false, false]);
+    }
+
+    #[test]
+    fn a_torrent_stopped_by_a_seeding_limit_frees_its_slot() {
+        let mut settings = limited(crate::limits::LimitSettings {
+            max_seeding: 1,
+            ..Default::default()
+        });
+        settings.ratio_limit_pct = 100;
+        let mut done = seed("a", 1);
+        done.uploaded = 1000;
+        let out = apply(&[done, seed("b", 2)], &settings, NOON);
+        assert!(out[0].holds.ratio && !out[0].holds.queue);
+        assert!(!out[1].holds.queue);
+    }
+
+    #[test]
+    fn active_limit_counts_downloads_first_then_seeds() {
+        let limits = crate::limits::LimitSettings {
+            max_active: 3,
+            ..Default::default()
+        };
+        let items = [seed("s1", 1), item("d1", 2), item("d2", 3), seed("s2", 4)];
+        assert_eq!(holds(&items, limits, 0), [false, false, false, true]);
+        // The download limit still applies inside the active limit.
+        assert_eq!(holds(&items, limits, 1), [false, false, true, false]);
+    }
+
+    #[test]
+    fn slow_torrents_can_be_left_out_of_the_limits() {
+        let mut limits = crate::limits::LimitSettings {
+            max_active: 1,
+            ..Default::default()
+        };
+        let mut slow = item("a", 1);
+        slow.slow = true;
+        let mut slow_seed = seed("s", 1);
+        slow_seed.slow = true;
+        let items = [slow, item("b", 2), slow_seed, seed("t", 2)];
+        assert_eq!(holds(&items, limits, 0), [false, true, true, true]);
+        limits.ignore_slow = true;
+        assert_eq!(holds(&items, limits, 0), [false, false, false, true]);
     }
 
     #[test]

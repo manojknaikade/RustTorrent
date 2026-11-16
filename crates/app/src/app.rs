@@ -6,6 +6,8 @@ use eframe::egui::{self, Color32, RichText, Sense};
 use egui_extras::{Column, TableBuilder};
 use rusttorrent_core::{format, manage, Command, Core, Feed, HoldReason, Move, Schedule, Snapshot, State, TorrentView};
 
+mod limits;
+
 fn color(state: State) -> Color32 {
     match state {
         State::Downloading => Color32::from_rgb(64, 156, 255),
@@ -243,6 +245,7 @@ pub struct App {
     quit: bool,
     /// The user agreed to quit.
     quit_ok: bool,
+    limits: Option<limits::LimitsDialog>,
 }
 
 fn ratio_of(t: &TorrentView) -> f64 {
@@ -315,6 +318,7 @@ impl App {
             adding: Default::default(),
             quit: false,
             quit_ok: false,
+            limits: None,
         }
     }
 
@@ -468,15 +472,9 @@ impl App {
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let s = &self.snap.settings;
-                let limit = |kib: u32| {
-                    if kib == 0 {
-                        "no limit".to_owned()
-                    } else {
-                        format!("{kib} KiB/s")
-                    }
-                };
-                let text = format!("Limits: ↓ {}  ↑ {}", limit(s.down_limit_kib), limit(s.up_limit_kib));
-                ui.label(RichText::new(text).small().weak());
+                if limits::status(ui, &self.core, &self.snap) {
+                    self.limits = Some(limits::LimitsDialog::of(&self.snap));
+                }
                 if self.snap.schedule_off {
                     let text = format!(
                         "Transfers are off by schedule until {}",
@@ -646,9 +644,10 @@ impl App {
                 };
                 let waiting = match t.held {
                     None => "–",
+                    Some(HoldReason::Queue) if t.queue_pos.is_none() => "A free seeding slot",
                     Some(HoldReason::Queue) => "A free download slot",
                     Some(HoldReason::Schedule) => "The schedule",
-                    Some(HoldReason::Ratio) => "Nothing: ratio limit reached",
+                    Some(HoldReason::Ratio) => limits::stopped_text(t),
                     Some(HoldReason::Network) => "The network",
                 };
                 row(
@@ -659,6 +658,7 @@ impl App {
                         ("Waiting for", waiting.to_owned()),
                     ],
                 );
+                row(ui, limits::overview_row(t, &self.snap));
             });
         ui.add_space(4.0);
         ui.horizontal(|ui| {
@@ -920,6 +920,9 @@ impl App {
                                 }
                             }
                         });
+                        if let Some(command) = limits::seeding_menu(ui, t, &key) {
+                            action = Some((command, false));
+                        }
                         ui.menu_button("Category", |ui| {
                             if ui.radio(t.category.is_none(), "None").clicked() {
                                 action = Some((
@@ -1594,6 +1597,12 @@ impl App {
             }
         }
 
+        if let Some(dialog) = &mut self.limits {
+            if dialog.show(ctx, &self.core) {
+                self.limits = None;
+            }
+        }
+
         if let Some(dialog) = &mut self.feeds {
             let (mut close, mut save) = (false, false);
             let core = &self.core;
@@ -1834,9 +1843,11 @@ impl eframe::App for App {
                 use std::sync::atomic::{AtomicBool, Ordering};
                 static OPENED: AtomicBool = AtomicBool::new(false);
                 let wanted = std::env::var("RUSTTORRENT_SHOT_TAB").unwrap_or_default();
-                let known = ["feeds", "settings", "add", "quit"].contains(&wanted.as_str());
+                let known = ["feeds", "settings", "add", "quit", "limits"].contains(&wanted.as_str());
                 if known && self.snap.ready && !OPENED.swap(true, Ordering::Relaxed) {
-                    if wanted == "feeds" {
+                    if wanted == "limits" {
+                        self.limits = Some(limits::LimitsDialog::of(&self.snap));
+                    } else if wanted == "feeds" {
                         self.feeds = Some(FeedsDialog::of(&self.snap));
                     } else if wanted == "add" {
                         // RUSTTORRENT_SHOT_ADD holds the link or file to show in the add dialog.
@@ -1872,7 +1883,8 @@ impl eframe::App for App {
             && self.name.is_none()
             && self.feeds.is_none()
             && !self.adding.is_open()
-            && !self.quit;
+            && !self.quit
+            && self.limits.is_none();
         if !typing
             && no_dialog
             && ctx.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace))

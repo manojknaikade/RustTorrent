@@ -302,6 +302,7 @@ mod tests {
             trackers: Arc::new(vec!["http://t.example/announce?a=1".into()]),
             peers: Vec::new(),
             force_start: false,
+            limits: Default::default(),
         };
         assert_eq!(
             magnet_link(&t),

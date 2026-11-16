@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use crate::arbiter::HoldReason;
 use crate::feeds::Feed;
+use crate::limits::{SlowReason, TorrentLimits};
 use crate::net::Interface;
 use crate::store::Settings;
 
@@ -95,6 +96,7 @@ pub struct TorrentView {
     pub peers: Vec<PeerView>,
     /// Downloads even when the queue is full.
     pub force_start: bool,
+    pub limits: TorrentLimits,
 }
 
 impl TorrentView {
@@ -152,4 +154,6 @@ pub struct Snapshot {
     pub remote_error: Option<String>,
     /// Torrents the add dialog asked about, with their files once known.
     pub inspected: Vec<crate::manage::Inspection>,
+    /// Whether slow mode is on, and why.
+    pub slow: Option<SlowReason>,
 }
