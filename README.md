@@ -25,6 +25,7 @@ Adding
 - Add torrents by magnet link, `.torrent` file, web address of a `.torrent` file, or bare info-hash.
 - Add by clicking a magnet link in a browser, opening a `.torrent` file from Finder, dropping a file on the window, or pasting into the add box.
 - Add dialog: choose the folder, category, files and "start paused" before the download begins. It appears when "ask where to save" is on in Settings.
+- Folder buttons open a menu of the last 8 folders used, with "Other folder…" to pick a new one.
 - Watch folder: `.torrent` files put in a chosen folder are added by themselves. A file that has been added is renamed to end in `.added`.
 - RSS and Atom feeds, read every 15 minutes. A feed's rule can use word lists or a regular expression, an episode filter ("S02E05 and later"), skip repeats of an episode, and take only items newer than the ones already listed. A preview shows a feed's items with a Download button for each. A feed can give its torrents a category.
 
@@ -33,7 +34,7 @@ Managing
 - Pause, resume, force start (ignore the queue) and remove (optionally deleting the downloaded files).
 - Choose which files of a torrent to download, and give each file a priority: high, normal or low.
 - Recheck a torrent's data, reannounce it to its trackers, or move its data to another folder (right-click menu). A move takes the torrent out of the engine, moves the files, then adds it back at the new folder, where its data is checked again. A move cut short by quitting finishes on the next start.
-- Categories and tags, with filters in the sidebar. Make a category with + in the sidebar or by typing a name in the add dialog; right-click one in the sidebar to delete it. A category can have its own download folder.
+- Categories and tags, with filters in the sidebar. Make a category with + in the sidebar or by typing a name in the add dialog; right-click one in the sidebar to set its folder or delete it. A category can have its own download folder: a torrent put in that category is saved there, and its data is moved there if it was already downloading.
 - Copy a torrent's magnet link, info-hash or name. Save its `.torrent` file.
 - Make a `.torrent` from a file or folder: trackers in tiers, piece size, comment, private flag, and start seeding it straight away.
 - Downloads go in order: high-priority files first, then normal, then low, by name within each, each file from its start to its end (the first and last piece of a file come first, so a player can read its index). This is how the engine works, so it cannot be switched off.

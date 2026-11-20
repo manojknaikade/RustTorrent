@@ -4638,7 +4638,7 @@ dependencies = [
 
 [[package]]
 name = "rusttorrent"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "block2 0.6.2",
  "eframe",
@@ -4652,7 +4652,7 @@ dependencies = [
 
 [[package]]
 name = "rusttorrent-core"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "anyhow",
  "aws-lc-rs",
