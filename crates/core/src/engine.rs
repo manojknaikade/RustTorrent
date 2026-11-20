@@ -121,6 +121,11 @@ pub enum Command {
         category: String,
         dir: Option<PathBuf>,
     },
+    /// Makes a category that torrents can be put in later.
+    AddCategory(String),
+    /// Deletes a category: torrents in it are left with none, and its folder is forgotten.
+    /// Files stay where they are.
+    RemoveCategory(String),
     /// Whether adding from the window shows the add dialog first.
     SetAskBeforeAdd(bool),
     Shutdown,
@@ -717,6 +722,9 @@ impl Worker {
         self.forget_upload(&done.text);
         match done.result {
             Ok((key, name, false)) => {
+                if let Some(c) = &category {
+                    self.store.data.settings.categories.insert(c.clone());
+                }
                 let queue_pos = self.next_queue_pos();
                 self.store.data.torrents.insert(
                     key,
@@ -939,6 +947,9 @@ impl Worker {
             }
             Command::SetCategory { keys, category } => {
                 let category = category.map(|c| c.trim().to_owned()).filter(|c| !c.is_empty());
+                if let Some(name) = &category {
+                    self.store.data.settings.categories.insert(name.clone());
+                }
                 for key in keys {
                     if let Some(record) = self.store.data.torrents.get_mut(&key) {
                         record.category = category.clone();
@@ -1054,6 +1065,24 @@ impl Worker {
                     Some(dir) => dirs.insert(category, dir),
                     None => dirs.remove(&category),
                 };
+                self.save();
+            }
+            Command::AddCategory(name) => {
+                let name = name.trim();
+                if !name.is_empty() {
+                    self.store.data.settings.categories.insert(name.to_owned());
+                    self.save();
+                }
+            }
+            Command::RemoveCategory(name) => {
+                let data = &mut self.store.data;
+                data.settings.categories.remove(&name);
+                data.settings.category_dirs.remove(&name);
+                for record in data.torrents.values_mut() {
+                    if record.category.as_ref() == Some(&name) {
+                        record.category = None;
+                    }
+                }
                 self.save();
             }
             Command::SetAskBeforeAdd(on) => {

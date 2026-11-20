@@ -497,6 +497,8 @@ fn state_json(snap: &Snapshot) -> serde_json::Value {
         .iter()
         .filter_map(|t| t.category.as_ref())
         .chain(snap.feeds.iter().filter_map(|f| f.feed.category.as_ref()))
+        .chain(snap.settings.categories.iter())
+        .chain(snap.settings.category_dirs.keys())
         .collect();
     categories.sort();
     categories.dedup();

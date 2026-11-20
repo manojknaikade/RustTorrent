@@ -1,15 +1,12 @@
-//! Speed graph, piece map, statistics and log windows, the tracker filter, the column
-//! chooser, the theme, and what happens when downloads finish. `app.rs` calls in here.
-use std::collections::BTreeMap;
+//! Speed graph, piece map, statistics and log windows, the column chooser,
+//! the theme, and what happens when downloads finish. `app.rs` calls in here.
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use eframe::egui::{self, Color32, Pos2, Rect, RichText, Sense, Shape, Stroke, Vec2};
 use rusttorrent_core::comfort::HISTORY_SECS;
-use rusttorrent_core::{
-    format, ComfortSettings, PieceMap, Snapshot, SpeedHistory, State, Theme, TorrentView, WhenAllDone,
-};
+use rusttorrent_core::{format, ComfortSettings, PieceMap, Snapshot, SpeedHistory, State, Theme, WhenAllDone};
 
 #[cfg(target_os = "macos")]
 use crate::mac_extras as sys;
@@ -365,68 +362,6 @@ pub fn piece_strip(ui: &mut egui::Ui, map: &PieceMap, fill: Color32) {
     response.on_hover_text(format!("Which parts are downloaded. {} pieces.", map.pieces));
 }
 
-/// The host name of a tracker address, such as "tracker.example.org".
-pub fn host(url: &str) -> String {
-    let rest = url.split_once("://").map_or(url, |(_, r)| r);
-    let rest = rest.split(['/', '?']).next().unwrap_or(rest);
-    let rest = rest.rsplit_once('@').map_or(rest, |(_, h)| h);
-    let host = match rest.strip_prefix('[') {
-        Some(r) => r.split(']').next().unwrap_or(r),
-        None => rest.split(':').next().unwrap_or(rest),
-    };
-    host.to_lowercase()
-}
-
-/// Whether a torrent uses a tracker on this host. An empty host means "no tracker at all".
-pub fn has_tracker(t: &TorrentView, chosen: &str) -> bool {
-    if chosen.is_empty() {
-        t.trackers.is_empty()
-    } else {
-        t.trackers.iter().any(|u| host(u) == chosen)
-    }
-}
-
-/// The TRACKERS part of the sidebar. Returns true when the choice changed.
-pub fn tracker_section(ui: &mut egui::Ui, torrents: &[TorrentView], chosen: &mut Option<String>) -> bool {
-    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
-    let mut none = 0;
-    for t in torrents {
-        let mut hosts: Vec<String> = t.trackers.iter().map(|u| host(u)).filter(|h| !h.is_empty()).collect();
-        hosts.sort();
-        hosts.dedup();
-        if hosts.is_empty() {
-            none += 1;
-        }
-        for h in hosts {
-            *counts.entry(h).or_default() += 1;
-        }
-    }
-    let mut entries: Vec<(String, String, usize)> = counts.into_iter().map(|(h, n)| (h.clone(), h, n)).collect();
-    if none > 0 && !entries.is_empty() {
-        entries.push((String::new(), "No tracker".to_owned(), none));
-    }
-    // A tracker that no torrent uses any more cannot be filtered on.
-    if chosen.as_ref().is_some_and(|c| !entries.iter().any(|(h, _, _)| h == c)) {
-        *chosen = None;
-        return true;
-    }
-    if entries.is_empty() {
-        return false;
-    }
-    let mut changed = false;
-    ui.add_space(10.0);
-    ui.label(RichText::new("TRACKERS").small().weak());
-    for (h, label, count) in entries {
-        let on = chosen.as_ref() == Some(&h);
-        let button = egui::Button::selectable(on, format!("{label}  {count}")).truncate();
-        if ui.add(button).clicked() {
-            *chosen = if on { None } else { Some(h) };
-            changed = true;
-        }
-    }
-    changed
-}
-
 /// The columns of the torrent list that can be hidden.
 pub const HIDEABLE: [&str; 8] = ["#", "Progress", "Size", "Down", "Up", "Time left", "Peers", "Ratio"];
 
@@ -519,14 +454,6 @@ pub(crate) fn shot_theme() -> Option<Theme> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn hosts() {
-        assert_eq!(host("udp://tracker.Example.org:1337/announce"), "tracker.example.org");
-        assert_eq!(host("https://user:pw@t.example.com/a?b=c"), "t.example.com");
-        assert_eq!(host("http://[2001:db8::1]:80/announce"), "2001:db8::1");
-        assert_eq!(host("bare.host"), "bare.host");
-    }
 
     #[test]
     fn columns() {

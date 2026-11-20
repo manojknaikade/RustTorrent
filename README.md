@@ -32,7 +32,7 @@ Managing
 
 - Pause, resume, force start (ignore the queue) and remove (optionally deleting the downloaded files).
 - Choose which files of a torrent to download.
-- Categories and tags, with filters in the sidebar. A category can have its own download folder.
+- Categories and tags, with filters in the sidebar. Make a category with + in the sidebar or by typing a name in the add dialog; right-click one in the sidebar to delete it. A category can have its own download folder.
 - Copy a torrent's magnet link, info-hash or name. Save its `.torrent` file.
 - Make a `.torrent` from a file or folder: trackers in tiers, piece size, comment, private flag, and start seeding it straight away.
 - Downloads go in order: files one after another by name, each from its start to its end (the first and last piece of a file come first, so a player can read its index). This is how the engine always works, so it cannot be switched off.
@@ -56,7 +56,7 @@ Network
 The window
 
 - Details in the main window: overview with a piece map, files, peers and trackers for the selected torrent.
-- Sortable table with a column chooser, search, and filters by status, category, tag and tracker.
+- Sortable table with a column chooser, search, and filters by status, category and tag.
 - Speed graph in the toolbar, a Statistics window with all-time totals, and a Log window.
 - Dark and light themes.
 - When a download finishes: a notification, and optionally a program is run (`%N` is the torrent's name, `%F` its folder). When all downloads finish, the app can quit.

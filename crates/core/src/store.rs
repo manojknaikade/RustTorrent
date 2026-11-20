@@ -41,6 +41,8 @@ pub struct Settings {
     pub ask_before_add: bool,
     /// The folder each category saves to, by category name. Others use `download_dir`.
     pub category_dirs: BTreeMap<String, PathBuf>,
+    /// Every category made so far, kept even while no torrent is in it.
+    pub categories: std::collections::BTreeSet<String>,
     /// Slow mode, seeding time limits, queue limits and peers per torrent.
     pub limits: LimitSettings,
     /// Port, peer finding, proxy and block list. Applied by starting a new engine session.
@@ -100,6 +102,7 @@ impl Default for Settings {
             remote: RemoteSettings::default(),
             ask_before_add: true,
             category_dirs: BTreeMap::new(),
+            categories: Default::default(),
             limits: LimitSettings::default(),
             network: Default::default(),
             comfort: crate::comfort::ComfortSettings::default(),

@@ -11,6 +11,8 @@ struct Form {
     text: String,
     folder: Option<PathBuf>,
     category: Option<String>,
+    /// The name typed for a new category, if any.
+    new_category: String,
     paused: bool,
     /// One per file once the list is known. Empty until then.
     files: Vec<bool>,
@@ -22,6 +24,7 @@ impl Form {
             text,
             folder: None,
             category: None,
+            new_category: String::new(),
             paused: false,
             files: Vec::new(),
         }
@@ -112,16 +115,31 @@ impl AddQueue {
                 .spacing([12.0, 6.0])
                 .show(ui, |ui| {
                     ui.label("Category");
-                    let shown = form.category.clone().unwrap_or_else(|| "None".to_owned());
-                    egui::ComboBox::from_id_salt("add-category")
-                        .selected_text(shown)
-                        .width(220.0)
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut form.category, None, "None");
-                            for name in &categories {
-                                ui.selectable_value(&mut form.category, Some(name.clone()), name);
-                            }
-                        });
+                    ui.horizontal(|ui| {
+                        let shown = form.category.clone().unwrap_or_else(|| "None".to_owned());
+                        let before = form.category.clone();
+                        egui::ComboBox::from_id_salt("add-category")
+                            .selected_text(shown)
+                            .width(180.0)
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut form.category, None, "None");
+                                for name in &categories {
+                                    ui.selectable_value(&mut form.category, Some(name.clone()), name);
+                                }
+                            });
+                        if form.category != before {
+                            form.new_category.clear();
+                        }
+                        let typed = ui.add(
+                            egui::TextEdit::singleline(&mut form.new_category)
+                                .hint_text("or type a new one")
+                                .desired_width(160.0),
+                        );
+                        if typed.changed() {
+                            let name = form.new_category.trim();
+                            form.category = (!name.is_empty()).then(|| name.to_owned());
+                        }
+                    });
                     ui.end_row();
                     ui.label("Save to");
                     ui.horizontal(|ui| {

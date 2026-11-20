@@ -140,13 +140,15 @@ impl FeedsDialog {
     }
 }
 
-/// Every category and every tag in use, each sorted by name.
+/// Every category made so far and every tag in use, each sorted by name.
 fn names_in_use(snap: &Snapshot) -> (Vec<String>, Vec<String>) {
     let mut categories: Vec<String> = snap
         .torrents
         .iter()
         .filter_map(|t| t.category.clone())
         .chain(snap.feeds.iter().filter_map(|f| f.feed.category.clone()))
+        .chain(snap.settings.categories.iter().cloned())
+        .chain(snap.settings.category_dirs.keys().cloned())
         .collect();
     let mut tags: Vec<String> = snap.torrents.iter().flat_map(|t| t.tags.iter().cloned()).collect();
     for list in [&mut categories, &mut tags] {
@@ -253,8 +255,6 @@ pub struct App {
     quit_ok: bool,
     limits: Option<limits::LimitsDialog>,
     create: Option<crate::make::CreateDialog>,
-    /// Show only torrents with a tracker on this host ("" for none).
-    tracker: Option<String>,
     extras: crate::comfort::Extras,
 }
 
@@ -330,7 +330,6 @@ impl App {
             quit_ok: false,
             limits: None,
             create: None,
-            tracker: None,
             extras: Default::default(),
         }
     }
@@ -357,11 +356,12 @@ impl App {
     fn rebuild(&mut self) {
         let all = &self.snap.torrents;
         let q = self.search.to_lowercase();
-        // A category or tag that no torrent has any more cannot be filtered on.
+        // A category that was deleted, or a tag that no torrent has any more, cannot be
+        // filtered on.
         if self
             .category
             .as_ref()
-            .is_some_and(|c| !all.iter().any(|t| t.category.as_ref() == Some(c)))
+            .is_some_and(|c| !names_in_use(&self.snap).0.contains(c))
         {
             self.category = None;
         }
@@ -378,7 +378,6 @@ impl App {
                 self.filter.matches(t.state)
                     && self.category.as_ref().is_none_or(|c| t.category.as_ref() == Some(c))
                     && self.tag.as_ref().is_none_or(|g| t.tags.contains(g))
-                    && self.tracker.as_ref().is_none_or(|h| crate::comfort::has_tracker(t, h))
                     && (q.is_empty() || t.name.to_lowercase().contains(&q))
             })
             .collect();
@@ -528,6 +527,7 @@ impl App {
         }
         let snap = self.snap.clone();
         let (categories, tags) = names_in_use(&snap);
+        let (mut new_category, mut remove) = (false, None::<String>);
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
             for (title, names, tag) in [("CATEGORIES", categories, false), ("TAGS", tags, true)] {
                 let names: Vec<(String, usize)> = names
@@ -543,28 +543,58 @@ impl App {
                         let count = snap.torrents.iter().filter(has).count();
                         (n, count)
                     })
-                    .filter(|(_, count)| *count > 0)
+                    // A category stays until it is deleted; a tag goes when no torrent has it.
+                    .filter(|(_, count)| !tag || *count > 0)
                     .collect();
-                if names.is_empty() {
+                if tag && names.is_empty() {
                     continue;
                 }
                 ui.add_space(10.0);
-                ui.label(RichText::new(title).small().weak());
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(title).small().weak());
+                    if !tag {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let add = ui.small_button("+").on_hover_text("New category");
+                            if add.clicked() {
+                                new_category = true;
+                            }
+                        });
+                    }
+                });
+                if !tag && names.is_empty() {
+                    ui.label(RichText::new("None yet. Click + to make one.").small().weak());
+                }
                 let chosen = if tag { &mut self.tag } else { &mut self.category };
                 for (name, count) in names {
                     let on = chosen.as_ref() == Some(&name);
                     let label = egui::Button::selectable(on, format!("{name}  {count}")).truncate();
+                    let r = ui.add(label);
                     // A second click shows everything again.
-                    if ui.add(label).clicked() {
-                        *chosen = if on { None } else { Some(name) };
+                    if r.clicked() {
+                        *chosen = if on { None } else { Some(name.clone()) };
                         self.dirty = true;
+                    }
+                    if !tag {
+                        r.context_menu(|ui| {
+                            if ui.button("Delete category").clicked() {
+                                remove = Some(name.clone());
+                                ui.close();
+                            }
+                        });
                     }
                 }
             }
-            if crate::comfort::tracker_section(ui, &snap.torrents, &mut self.tracker) {
-                self.dirty = true;
-            }
         });
+        if new_category {
+            self.name = Some(NameDialog {
+                keys: Vec::new(),
+                tag: false,
+                text: String::new(),
+            });
+        }
+        if let Some(name) = remove {
+            self.core.send(Command::RemoveCategory(name));
+        }
     }
 
     fn details(&mut self, ui: &mut egui::Ui) {
@@ -1712,7 +1742,9 @@ impl App {
                 ui.heading(format!("New {what}"));
                 ui.add_space(4.0);
                 let n = dialog.keys.len();
-                ui.label(if n == 1 {
+                ui.label(if n == 0 {
+                    format!("Name of the new {what}")
+                } else if n == 1 {
                     format!("Name of the {what} for this torrent")
                 } else {
                     format!("Name of the {what} for these {n} torrents")
@@ -1736,7 +1768,9 @@ impl App {
             let text = dialog.text.trim().to_owned();
             if save && !text.is_empty() {
                 let keys = dialog.keys.clone();
-                self.core.send(if dialog.tag {
+                self.core.send(if keys.is_empty() && !dialog.tag {
+                    Command::AddCategory(text)
+                } else if dialog.tag {
                     Command::SetTag {
                         keys,
                         tag: text,
