@@ -521,6 +521,9 @@ impl Worker {
         if self.pending.iter().any(|p| p.text == text) {
             return;
         }
+        if let Some(dir) = &folder {
+            self.store.data.settings.remember_dir(dir);
+        }
         let label = intake::label(&source);
         let id = self.next_pending;
         self.next_pending += 1;
@@ -952,6 +955,7 @@ impl Worker {
                 self.save();
             }
             Command::SetDownloadDir(dir) => {
+                self.store.data.settings.remember_dir(&dir);
                 self.store.data.settings.download_dir = dir;
                 self.save();
             }
@@ -992,12 +996,18 @@ impl Worker {
                 if let Some(name) = &category {
                     self.store.data.settings.categories.insert(name.clone());
                 }
-                for key in keys {
-                    if let Some(record) = self.store.data.torrents.get_mut(&key) {
+                for key in &keys {
+                    if let Some(record) = self.store.data.torrents.get_mut(key) {
                         record.category = category.clone();
                     }
                 }
                 self.save();
+                // A category with its own folder keeps its torrents there, so their data
+                // moves when they join it. Torrents already in that folder stay put.
+                let dir = category.and_then(|c| self.store.data.settings.category_dirs.get(&c).cloned());
+                if let Some(dir) = dir {
+                    self.move_data(keys, dir).await;
+                }
             }
             Command::SetTag { keys, tag, on } => {
                 let tag = tag.trim().to_owned();
@@ -1140,7 +1150,11 @@ impl Worker {
                 }
                 self.save();
             }
-            Command::MoveData { keys, dir } => self.move_data(keys, dir).await,
+            Command::MoveData { keys, dir } => {
+                self.store.data.settings.remember_dir(&dir);
+                self.save();
+                self.move_data(keys, dir).await
+            }
             Command::SetForceStart { keys, on } => {
                 for key in &keys {
                     if let Some(record) = self.store.data.torrents.get_mut(key) {
@@ -1150,6 +1164,9 @@ impl Worker {
                 self.save();
             }
             Command::SetCategoryDir { category, dir } => {
+                if let Some(dir) = &dir {
+                    self.store.data.settings.remember_dir(dir);
+                }
                 let dirs = &mut self.store.data.settings.category_dirs;
                 match dir {
                     Some(dir) => dirs.insert(category, dir),

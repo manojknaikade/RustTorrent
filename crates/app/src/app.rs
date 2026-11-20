@@ -126,6 +126,8 @@ struct NameDialog {
     keys: Vec<String>,
     tag: bool,
     text: String,
+    /// For a category: the folder its torrents are saved to, if not the usual one.
+    folder: Option<std::path::PathBuf>,
 }
 
 struct FeedsDialog {
@@ -530,6 +532,7 @@ impl App {
         let snap = self.snap.clone();
         let (categories, tags) = names_in_use(&snap);
         let (mut new_category, mut remove) = (false, None::<String>);
+        let mut set_dir: Option<(String, Option<std::path::PathBuf>)> = None;
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
             for (title, names, tag) in [("CATEGORIES", categories, false), ("TAGS", tags, true)] {
                 let names: Vec<(String, usize)> = names
@@ -577,7 +580,23 @@ impl App {
                         self.dirty = true;
                     }
                     if !tag {
+                        let dir = snap.settings.category_dirs.get(&name);
+                        let r = match dir {
+                            Some(dir) => r.on_hover_text(format!("Saves to {}", dir.display())),
+                            None => r,
+                        };
                         r.context_menu(|ui| {
+                            ui.menu_button("Set folder", |ui| {
+                                let start = dir.unwrap_or(&snap.settings.download_dir);
+                                if let Some(dir) = crate::folders::menu_items(ui, &snap.settings.recent_dirs, start) {
+                                    set_dir = Some((name.clone(), Some(dir)));
+                                }
+                            });
+                            if dir.is_some() && ui.button("Use the usual folder").clicked() {
+                                set_dir = Some((name.clone(), None));
+                                ui.close();
+                            }
+                            ui.separator();
                             if ui.button("Delete category").clicked() {
                                 remove = Some(name.clone());
                                 ui.close();
@@ -592,10 +611,14 @@ impl App {
                 keys: Vec::new(),
                 tag: false,
                 text: String::new(),
+                folder: None,
             });
         }
         if let Some(name) = remove {
             self.core.send(Command::RemoveCategory(name));
+        }
+        if let Some((category, dir)) = set_dir {
+            self.core.send(Command::SetCategoryDir { category, dir });
         }
     }
 
@@ -657,14 +680,30 @@ impl App {
             crate::comfort::piece_strip(ui, map, color(State::Downloading));
         }
         ui.add_space(6.0);
+        // Every column gets a fixed width from the panel's width, so changing numbers such
+        // as the speeds never move the columns. Text too long for its column is cut short
+        // and shown in full on hover.
+        const KEY_W: f32 = 90.0;
+        const GAP: f32 = 28.0;
+        let value_w = ((ui.available_width() - 3.0 * KEY_W - 5.0 * GAP) / 3.0).clamp(110.0, 320.0);
         egui::Grid::new("overview")
             .num_columns(6)
-            .spacing([28.0, 6.0])
+            .spacing([GAP, 6.0])
             .show(ui, |ui| {
                 let row = |ui: &mut egui::Ui, items: [(&str, String); 3]| {
                     for (k, v) in items {
-                        ui.label(RichText::new(k).weak());
-                        ui.label(v);
+                        let cell = |ui: &mut egui::Ui, w: f32, label: egui::Label| {
+                            ui.allocate_ui_with_layout(
+                                egui::vec2(w, ui.spacing().interact_size.y),
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    ui.set_width(w);
+                                    ui.add(label.truncate());
+                                },
+                            );
+                        };
+                        cell(ui, KEY_W, egui::Label::new(RichText::new(k).weak()));
+                        cell(ui, value_w, egui::Label::new(v));
                     }
                     ui.end_row();
                 };
@@ -937,7 +976,8 @@ impl App {
         let mut ask_name: Option<(Vec<String>, bool)> = None;
         // Set when the menu asks to save a torrent's file: its key and name.
         let mut save_file: Option<(String, String)> = None;
-        let mut move_to: Option<(Vec<String>, String)> = None;
+        let mut move_to: Option<(Vec<String>, std::path::PathBuf)> = None;
+        let recent = self.snap.settings.recent_dirs.clone();
         let (categories, tags) = names_in_use(&snap);
         // Columns the user hid with a right-click on the header.
         let hidden = &snap.settings.comfort.hidden_columns;
@@ -1229,14 +1269,16 @@ impl App {
                             action = Some((Command::Reannounce(key.clone()), false));
                             ui.close();
                         }
-                        if ui
-                            .add_enabled(live, egui::Button::new("Move data…"))
-                            .on_hover_text("Move the downloaded files to another folder.")
-                            .clicked()
-                        {
-                            move_to = Some((key.clone(), t.save_path.clone()));
-                            ui.close();
-                        }
+                        ui.add_enabled_ui(live, |ui| {
+                            ui.menu_button("Move data to", |ui| {
+                                let start = std::path::Path::new(&t.save_path);
+                                if let Some(dir) = crate::folders::menu_items(ui, &recent, start) {
+                                    move_to = Some((key.clone(), dir));
+                                }
+                            })
+                            .response
+                            .on_hover_text("Move the downloaded files to another folder.");
+                        });
                         ui.separator();
                         if ui.button("Remove…").clicked() {
                             action = Some((
@@ -1298,16 +1340,15 @@ impl App {
                 keys,
                 tag,
                 text: String::new(),
+                folder: None,
             });
         }
         if sort != self.sort {
             self.sort = sort;
             self.dirty = true;
         }
-        if let Some((keys, start)) = move_to {
-            if let Some(dir) = rfd::FileDialog::new().set_directory(start).pick_folder() {
-                self.core.send(Command::MoveData { keys, dir });
-            }
+        if let Some((keys, dir)) = move_to {
+            self.core.send(Command::MoveData { keys, dir });
         }
         if let Some((key, name)) = save_file {
             let picked = rfd::FileDialog::new()
@@ -1474,11 +1515,9 @@ impl App {
                 ui.add_space(6.0);
                 ui.label(RichText::new("New torrents are saved to").weak());
                 ui.horizontal(|ui| {
-                    if ui.button("Change…").clicked() {
-                        let start = &snap.settings.download_dir;
-                        if let Some(dir) = rfd::FileDialog::new().set_directory(start).pick_folder() {
-                            core.send(Command::SetDownloadDir(dir));
-                        }
+                    let start = &snap.settings.download_dir;
+                    if let Some(dir) = crate::folders::button(ui, "Change", &snap.settings.recent_dirs, start) {
+                        core.send(Command::SetDownloadDir(dir));
                     }
                     ui.add(egui::Label::new(snap.settings.download_dir.display().to_string()).truncate());
                 });
@@ -1512,15 +1551,13 @@ impl App {
                                     };
                                     ui.add(egui::Label::new(text).truncate());
                                     ui.horizontal(|ui| {
-                                        if ui.button("Change…").clicked() {
-                                            let start = dir.unwrap_or(&snap.settings.download_dir);
-                                            if let Some(dir) = rfd::FileDialog::new().set_directory(start).pick_folder()
-                                            {
-                                                core.send(Command::SetCategoryDir {
-                                                    category: name.clone(),
-                                                    dir: Some(dir),
-                                                });
-                                            }
+                                        let start = dir.unwrap_or(&snap.settings.download_dir);
+                                        let recent = &snap.settings.recent_dirs;
+                                        if let Some(dir) = crate::folders::button(ui, "Change", recent, start) {
+                                            core.send(Command::SetCategoryDir {
+                                                category: name.clone(),
+                                                dir: Some(dir),
+                                            });
                                         }
                                         if dir.is_some() && ui.button("Clear").clicked() {
                                             core.send(Command::SetCategoryDir {
@@ -1534,7 +1571,7 @@ impl App {
                             });
                         ui.label(
                             RichText::new(
-                                "Used when a torrent is added. Torrents already in the list stay where they are.",
+                                "Used when a torrent is added, and when a torrent is put in the category: its data moves there. Changing a folder here does not move torrents already in the category.",
                             )
                             .small()
                             .weak(),
@@ -1870,6 +1907,25 @@ impl App {
                 } else if !r.has_focus() {
                     r.request_focus();
                 }
+                if !dialog.tag {
+                    ui.add_space(6.0);
+                    ui.label("Save its torrents to");
+                    ui.horizontal(|ui| {
+                        let start = dialog.folder.as_ref().unwrap_or(&self.snap.settings.download_dir);
+                        let recent = &self.snap.settings.recent_dirs;
+                        if let Some(dir) = crate::folders::button(ui, "Choose", recent, start) {
+                            dialog.folder = Some(dir);
+                        }
+                        if dialog.folder.is_some() && ui.button("Default").clicked() {
+                            dialog.folder = None;
+                        }
+                        let text = match &dialog.folder {
+                            Some(dir) => RichText::new(dir.display().to_string()),
+                            None => RichText::new("The usual download folder").weak(),
+                        };
+                        ui.add(egui::Label::new(text).truncate());
+                    });
+                }
                 ui.add_space(6.0);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button(RichText::new("Save").strong()).clicked() {
@@ -1883,6 +1939,13 @@ impl App {
             let text = dialog.text.trim().to_owned();
             if save && !text.is_empty() {
                 let keys = dialog.keys.clone();
+                // The folder is set first, so torrents put in the new category move there.
+                if let (false, Some(dir)) = (dialog.tag, dialog.folder.clone()) {
+                    self.core.send(Command::SetCategoryDir {
+                        category: text.clone(),
+                        dir: Some(dir),
+                    });
+                }
                 self.core.send(if keys.is_empty() && !dialog.tag {
                     Command::AddCategory(text)
                 } else if dialog.tag {
@@ -2075,9 +2138,12 @@ fn peers(ui: &mut egui::Ui, t: &TorrentView, core: &Core) {
         ui.label(RichText::new("No connected peers.").weak());
         return;
     }
+    let height = ui.available_height();
     TableBuilder::new(ui)
         .id_salt("peers")
         .striped(true)
+        .auto_shrink(false)
+        .max_scroll_height(height)
         .sense(Sense::click())
         .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
         .column(Column::exact(220.0))
@@ -2274,7 +2340,15 @@ impl eframe::App for App {
             .resizable(true)
             .default_size(230.0)
             .min_size(140.0)
-            .show(ui, |ui| self.details(ui));
+            .show(ui, |ui| {
+                // The content gets exactly the height the user set, so a long list or a
+                // tab switch never makes the panel grow. Anything taller scrolls or is cut.
+                let rect = ui.available_rect_before_wrap();
+                let mut inner = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(*ui.layout()));
+                inner.shrink_clip_rect(rect);
+                self.details(&mut inner);
+                ui.allocate_rect(rect, Sense::hover());
+            });
         egui::CentralPanel::default().show(ui, |ui| self.table(ui));
         self.dialogs(&ctx);
 

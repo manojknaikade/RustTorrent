@@ -143,12 +143,9 @@ impl AddQueue {
                     ui.end_row();
                     ui.label("Save to");
                     ui.horizontal(|ui| {
-                        if ui.button("Change…").clicked() {
-                            let start =
-                                manage::folder_for(&snap.settings, form.folder.as_ref(), form.category.as_deref());
-                            if let Some(dir) = rfd::FileDialog::new().set_directory(start).pick_folder() {
-                                form.folder = Some(dir);
-                            }
+                        let start = manage::folder_for(&snap.settings, form.folder.as_ref(), form.category.as_deref());
+                        if let Some(dir) = crate::folders::button(ui, "Change", &snap.settings.recent_dirs, &start) {
+                            form.folder = Some(dir);
                         }
                         if form.folder.is_some() && ui.button("Default").clicked() {
                             form.folder = None;

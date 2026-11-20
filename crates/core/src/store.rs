@@ -48,6 +48,20 @@ pub struct Settings {
     /// Port, peer finding, proxy and block list. Applied by starting a new engine session.
     pub network: crate::network::NetworkSettings,
     pub comfort: crate::comfort::ComfortSettings,
+    /// Folders chosen lately, newest first, offered in the folder menus.
+    pub recent_dirs: Vec<PathBuf>,
+}
+
+impl Settings {
+    /// How many folders [`Settings::recent_dirs`] keeps.
+    pub const RECENT_DIRS: usize = 8;
+
+    /// Puts `dir` first in the recent folders, without repeats.
+    pub fn remember_dir(&mut self, dir: &std::path::Path) {
+        self.recent_dirs.retain(|d| d != dir);
+        self.recent_dirs.insert(0, dir.to_path_buf());
+        self.recent_dirs.truncate(Self::RECENT_DIRS);
+    }
 }
 
 /// Remote control from a browser. Off until the user turns it on and sets a password.
@@ -106,6 +120,7 @@ impl Default for Settings {
             limits: LimitSettings::default(),
             network: Default::default(),
             comfort: crate::comfort::ComfortSettings::default(),
+            recent_dirs: Vec::new(),
         }
     }
 }
@@ -267,6 +282,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir.join("state.json")
+    }
+
+    #[test]
+    fn recent_dirs_newest_first_without_repeats() {
+        let mut s = Settings::default();
+        for i in 0..10 {
+            s.remember_dir(&PathBuf::from(format!("/d{i}")));
+        }
+        s.remember_dir(&PathBuf::from("/d5"));
+        assert_eq!(s.recent_dirs.len(), Settings::RECENT_DIRS);
+        assert_eq!(s.recent_dirs[0], PathBuf::from("/d5"));
+        assert_eq!(s.recent_dirs[1], PathBuf::from("/d9"));
+        assert_eq!(s.recent_dirs.iter().filter(|d| d.ends_with("d5")).count(), 1);
     }
 
     #[test]
