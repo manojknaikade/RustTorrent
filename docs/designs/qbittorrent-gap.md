@@ -20,11 +20,11 @@ The tables were first written against 0.6. A row now says which release closed i
 | qBittorrent feature | RustTorrent | Note |
 | --- | --- | --- |
 | Add dialog: choose folder, category, files and "start paused" before the download begins | Has it (0.7) |  |
-| Move a torrent's data to another folder | Missing | Engine lacks it |
+| Move a torrent's data to another folder | Has it | Takes the torrent out of the engine, moves the files, adds it back |
 | Folder per category | Has it (0.7) |  |
 | Separate folder for unfinished downloads | Missing | |
-| Force recheck of downloaded data | Missing | Engine lacks it |
-| Force reannounce to trackers | Missing | Engine lacks it |
+| Force recheck of downloaded data | Has it | Patched engine |
+| Force reannounce to trackers | Has it | Patched engine |
 | Force start (ignore the queue) | Has it (0.7) |  |
 | Rename a torrent or its files | Missing | Engine lacks it |
 | Copy magnet link, info-hash, name | Has it (0.7) |  |
@@ -39,7 +39,7 @@ The tables were first written against 0.6. A row now says which release closed i
 | qBittorrent feature | RustTorrent | Note |
 | --- | --- | --- |
 | Switch in-order download off (rarest pieces first) | Missing | Engine lacks it. Rarest-first is healthier for a swarm with few seeders |
-| File priority: high, normal, low | Missing | Engine lacks it; files are only on or off |
+| File priority: high, normal, low | Has it | Patched engine; priority sets the order files download in |
 | Download first and last pieces first | Has it | Always on |
 
 ### Limits
@@ -47,7 +47,7 @@ The tables were first written against 0.6. A row now says which release closed i
 | qBittorrent feature | RustTorrent | Note |
 | --- | --- | --- |
 | Second set of speed limits with a quick switch, and a schedule for it | Has it (0.8) | "Slow mode", switched from the status bar or by its schedule |
-| Speed limit per torrent | Missing | Engine lacks it |
+| Speed limit per torrent | Has it | Patched engine; set in the details panel |
 | Stop seeding after a time, or after a time without upload | Has it (0.8) |  |
 | Limit on seeding torrents and on all active torrents | Has it (0.8) |  |
 | Do not count slow torrents against the queue | Has it (0.8) |  |
@@ -117,8 +117,8 @@ The six releases planned here were built together and published as one, 0.12.0.
 - Binding the remote-control page to the chosen network interface (0.9).
 - The remote page cannot see or set slow mode, the seeding limits or the queue limits.
 
-**The engine checks failed for these**, so they are not built and are not faked: moving data, force recheck, force reannounce, per-torrent speed limits, upload slots, a peer-exchange switch, adding a peer by hand, per-piece availability.
+**The engine checks failed for these**, so they are not built and are not faked: upload slots, a peer-exchange switch, adding a peer by hand, per-piece availability.
 
-**Still needs an engine change.** A switch for in-order download, file priorities, tracker editing, renaming, encryption setting, web seeds, BitTorrent v2, super seeding, and the list above. The route is to propose each change to librqbit, or to keep a patched copy. The in-order switch and file priorities are the two most asked for in other clients.
+**Still needs an engine change.** A switch for in-order download, tracker editing, renaming, encryption setting, web seeds, BitTorrent v2, super seeding, and the list above. The route is to propose each change to librqbit, or to keep a patched copy. Recheck, reannounce, per-torrent limits and file priorities are now in a patched copy (manojknaikade/rqbit), offered upstream. The in-order switch needs a large change to the engine's piece picker and is left for later.
 
 **Size.** The app is now 17 MB, 2 MB over its 15 MB target.

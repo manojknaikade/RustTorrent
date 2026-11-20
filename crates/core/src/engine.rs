@@ -158,6 +158,28 @@ pub enum Command {
     SetComfort(crate::comfort::ComfortSettings),
     /// Read one feed and show its items without downloading anything. `None` stops showing.
     PreviewFeed(Option<String>),
+    /// Check the data of these torrents against their hashes again.
+    Recheck(Vec<String>),
+    /// Tell the trackers about these torrents now instead of waiting for the next time.
+    Reannounce(Vec<String>),
+    /// Speed limits in KiB/s for these torrents alone, on top of the global ones.
+    /// 0 means no limit of its own.
+    SetTorrentLimits {
+        keys: Vec<String>,
+        down_kib: u32,
+        up_kib: u32,
+    },
+    /// Set the priority of some files of a torrent.
+    SetFilePriority {
+        key: String,
+        files: Vec<usize>,
+        priority: crate::priority::Priority,
+    },
+    /// Move the data of these torrents to another folder and keep seeding from there.
+    MoveData {
+        keys: Vec<String>,
+        dir: PathBuf,
+    },
     /// Download one item of a feed by hand. The feed need not be saved yet.
     AddFeedItem {
         feed_url: String,
@@ -278,9 +300,12 @@ struct Worker {
     comfort: crate::comfort::Tracker,
     preview: Option<crate::model::FeedPreview>,
     remote_fingerprint: Option<String>,
+    /// Data moves running in the background, by key.
+    moves: HashMap<String, moving::MoveTask>,
 }
 
 mod make;
+mod moving;
 
 /// How long a torrent must stay below the slow-torrent speeds to count as slow.
 const SLOW_AFTER: Duration = Duration::from_secs(60);
@@ -368,6 +393,7 @@ async fn main_loop(
         comfort,
         preview: None,
         remote_fingerprint: None,
+        moves: HashMap::new(),
     };
     if let Some(note) = note {
         w.notice(note, true);
@@ -662,52 +688,63 @@ impl Worker {
 
     /// The list as it was last seen, for when there is no engine to ask.
     fn blocked_views(&self) -> Vec<TorrentView> {
-        let settings = &self.store.data.settings;
-        self.store
-            .data
-            .torrents
-            .iter()
-            .map(|(key, record)| TorrentView {
-                key: key.clone(),
-                name: if record.name.is_empty() {
-                    key.clone()
-                } else {
-                    record.name.clone()
-                },
-                state: match record.intent {
+        (self.store.data.torrents.iter())
+            .map(|(key, record)| {
+                let state = match record.intent {
+                    _ if record.moving.is_some() => State::Moving,
                     Intent::Run => State::Blocked,
                     Intent::Pause if record.finished => State::Completed,
                     Intent::Pause => State::Paused,
-                },
-                error: None,
-                total: record.total,
-                done: record.done,
-                uploaded: record.uploaded,
-                down_bps: 0,
-                up_bps: 0,
-                peers_live: 0,
-                peers_seen: 0,
-                category: record.category.clone(),
-                tags: record.tags.clone(),
-                save_path: manage::folder_for(settings, None, record.category.as_deref())
-                    .to_string_lossy()
-                    .into_owned(),
-                added_at: record.added_at,
-                held: None,
-                queue_pos: None,
-                ratio_limit_pct: record.ratio_limit_pct,
-                files: self.meta.get(key).map(|m| m.files.clone()).unwrap_or_default(),
-                file_done: Vec::new(),
-                selected: None,
-                trackers: self.meta.get(key).map(|m| m.trackers.clone()).unwrap_or_default(),
-                peers: Vec::new(),
-                force_start: record.force_start,
-                limits: TorrentLimits {
-                    seeding: record.seeding,
-                    ..Default::default()
-                },
+                };
+                self.record_view(key, record, state)
             })
             .collect()
+    }
+
+    /// A torrent as its record last saw it, for when the engine does not have it.
+    fn record_view(&self, key: &str, record: &Record, state: State) -> TorrentView {
+        let settings = &self.store.data.settings;
+        let save_path = match &record.moving {
+            Some(note) => note.to.clone(),
+            None => manage::folder_for(settings, None, record.category.as_deref()),
+        };
+        TorrentView {
+            key: key.to_owned(),
+            name: if record.name.is_empty() {
+                key.to_owned()
+            } else {
+                record.name.clone()
+            },
+            state,
+            error: None,
+            total: record.total,
+            done: record.done,
+            uploaded: record.uploaded,
+            down_bps: 0,
+            up_bps: 0,
+            peers_live: 0,
+            peers_seen: 0,
+            category: record.category.clone(),
+            tags: record.tags.clone(),
+            save_path: save_path.to_string_lossy().into_owned(),
+            added_at: record.added_at,
+            held: None,
+            queue_pos: None,
+            ratio_limit_pct: record.ratio_limit_pct,
+            files: self.meta.get(key).map(|m| m.files.clone()).unwrap_or_default(),
+            file_done: Vec::new(),
+            selected: None,
+            trackers: self.meta.get(key).map(|m| m.trackers.clone()).unwrap_or_default(),
+            peers: Vec::new(),
+            force_start: record.force_start,
+            limits: TorrentLimits {
+                seeding: record.seeding,
+                ..Default::default()
+            },
+            down_limit_kib: record.down_limit_kib,
+            up_limit_kib: record.up_limit_kib,
+            priorities: record.priorities.clone(),
+        }
     }
 
     fn added(&mut self, done: AddDone) {
@@ -867,6 +904,11 @@ impl Worker {
                         self.notice("Torrents cannot be removed while all traffic is blocked.", true);
                         break;
                     };
+                    if self.store.data.torrents.get(&key).is_some_and(|r| r.moving.is_some()) {
+                        let name = self.store.data.torrents[&key].name.clone();
+                        self.notice(format!("{name} cannot be removed while its data is being moved."), true);
+                        continue;
+                    }
                     let Some(handle) = self.find(&key) else { continue };
                     let name = handle.name().unwrap_or_else(|| key.clone());
                     match session.delete(TorrentIdOrHash::Id(handle.id()), delete_files).await {
@@ -1051,6 +1093,54 @@ impl Worker {
             Command::Watch(key) => self.watched = key,
             Command::Inspect(texts) => self.inspector.want(texts, self.session.as_ref()),
             Command::AddWith(options) => self.add_with(options),
+            Command::Recheck(keys) => {
+                let Some(session) = self.session.clone() else {
+                    return self.notice("Torrents cannot be checked while all traffic is blocked.", true);
+                };
+                for key in keys {
+                    let Some(handle) = self.find(&key) else { continue };
+                    let name = handle.name().unwrap_or_else(|| key.clone());
+                    match session.recheck(&handle).await {
+                        Ok(()) => self.notice(format!("Checking {name}"), false),
+                        Err(e) => self.notice(format!("Could not check {name}: {e:#}"), true),
+                    }
+                }
+            }
+            Command::Reannounce(keys) => {
+                for key in keys {
+                    let Some(handle) = self.find(&key) else { continue };
+                    if let Err(e) = handle.reannounce() {
+                        let name = handle.name().unwrap_or_else(|| key.clone());
+                        let why = if handle.is_paused() {
+                            "it is paused".to_owned()
+                        } else {
+                            format!("{e:#}")
+                        };
+                        self.notice(format!("Could not reannounce {name}: {why}"), true);
+                    }
+                }
+            }
+            Command::SetTorrentLimits { keys, down_kib, up_kib } => {
+                for key in &keys {
+                    if let Some(record) = self.store.data.torrents.get_mut(key) {
+                        (record.down_limit_kib, record.up_limit_kib) = (down_kib, up_kib);
+                    }
+                    if let Some(handle) = self.find(key) {
+                        self.sync_extras(key, &handle);
+                    }
+                }
+                self.save();
+            }
+            Command::SetFilePriority { key, files, priority } => {
+                if let Some(record) = self.store.data.torrents.get_mut(&key) {
+                    record.priorities.set(&files, priority);
+                }
+                if let Some(handle) = self.find(&key) {
+                    self.sync_extras(&key, &handle);
+                }
+                self.save();
+            }
+            Command::MoveData { keys, dir } => self.move_data(keys, dir).await,
             Command::SetForceStart { keys, on } => {
                 for key in &keys {
                     if let Some(record) = self.store.data.torrents.get_mut(key) {
@@ -1331,6 +1421,33 @@ impl Worker {
         }
     }
 
+    /// Gives the engine this torrent's own speed limits and file order. The engine keeps
+    /// neither across a restart, so this runs every second and changes only what differs.
+    fn sync_extras(&mut self, key: &str, handle: &Handle) {
+        let Some(record) = self.store.data.torrents.get(key) else {
+            return;
+        };
+        let wanted = LimitsConfig {
+            download_bps: limit(record.down_limit_kib),
+            upload_bps: limit(record.up_limit_kib),
+        };
+        if handle.ratelimits() != wanted {
+            handle.set_ratelimits(wanted);
+        }
+        let Some(meta) = self.meta.get(key) else { return };
+        let order = record.priorities.file_order(&meta.files);
+        if handle.file_order() != order {
+            if let Err(e) = handle.update_file_order(order) {
+                // Only fails for a bad index, which file_order never gives; say it once.
+                let name = handle.name().unwrap_or_else(|| key.to_owned());
+                if let Some(record) = self.store.data.torrents.get_mut(key) {
+                    record.priorities = Default::default();
+                }
+                self.notice(format!("Could not set file priorities of {name}: {e:#}"), true);
+            }
+        }
+    }
+
     fn meta_for(&mut self, key: &str, handle: &Handle) -> (Arc<Vec<FileMeta>>, Arc<Vec<String>>) {
         if !self.meta.contains_key(key) {
             let files = handle
@@ -1389,6 +1506,7 @@ impl Worker {
         let seed_secs = self.seed_clock.elapsed().as_secs();
         self.seed_clock += Duration::from_secs(seed_secs);
 
+        self.move_tick().await;
         if let Some(session) = self.session.clone() {
             // First look at every torrent, then let the rules see them all together.
             let mut rows = Vec::new();
@@ -1496,6 +1614,7 @@ impl Worker {
                     Vec::new()
                 };
                 let (files, trackers) = self.meta_for(&key, &handle);
+                self.sync_extras(&key, &handle);
                 let record = &self.store.data.torrents[&key];
                 torrents.push(TorrentView {
                     name: handle.name().unwrap_or_else(|| key.clone()),
@@ -1526,8 +1645,16 @@ impl Worker {
                         stop: outcome.seed_stop,
                         slow: self.slow_since.get(&key).is_some_and(|t| t.elapsed() >= SLOW_AFTER),
                     },
+                    down_limit_kib: record.down_limit_kib,
+                    up_limit_kib: record.up_limit_kib,
+                    priorities: record.priorities.clone(),
                     key,
                 });
+            }
+            for (key, record) in &self.store.data.torrents {
+                if record.moving.is_some() {
+                    torrents.push(self.record_view(key, record, State::Moving));
+                }
             }
         } else {
             torrents = self.blocked_views();
@@ -1567,6 +1694,9 @@ impl Worker {
                 peers: Vec::new(),
                 force_start: false,
                 limits: TorrentLimits::default(),
+                down_limit_kib: 0,
+                up_limit_kib: 0,
+                priorities: Default::default(),
             });
         }
 

@@ -17,6 +17,8 @@ pub mod manage;
 pub mod model;
 pub mod net;
 pub mod network;
+pub mod priority;
+pub mod relocate;
 pub mod remote;
 pub mod rules;
 pub mod store;
@@ -35,6 +37,7 @@ pub use manage::{AddOptions, Inspection};
 pub use model::{FeedPreview, FeedView, FileMeta, Notice, PeerView, Snapshot, State, TorrentView};
 pub use net::Interface;
 pub use network::{NetworkSettings, NetworkStatus, ProxySettings};
+pub use priority::{FilePriorities, Priority};
 pub use rules::{Move, Schedule};
 pub use store::{RemoteSettings, Settings};
 

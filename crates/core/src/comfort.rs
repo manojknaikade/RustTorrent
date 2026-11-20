@@ -466,6 +466,9 @@ mod tests {
             peers: Vec::new(),
             force_start: false,
             limits: Default::default(),
+            down_limit_kib: 0,
+            up_limit_kib: 0,
+            priorities: Default::default(),
         }
     }
 

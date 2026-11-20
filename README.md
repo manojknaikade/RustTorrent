@@ -31,16 +31,17 @@ Adding
 Managing
 
 - Pause, resume, force start (ignore the queue) and remove (optionally deleting the downloaded files).
-- Choose which files of a torrent to download.
+- Choose which files of a torrent to download, and give each file a priority: high, normal or low.
+- Recheck a torrent's data, reannounce it to its trackers, or move its data to another folder (right-click menu). A move takes the torrent out of the engine, moves the files, then adds it back at the new folder, where its data is checked again. A move cut short by quitting finishes on the next start.
 - Categories and tags, with filters in the sidebar. Make a category with + in the sidebar or by typing a name in the add dialog; right-click one in the sidebar to delete it. A category can have its own download folder.
 - Copy a torrent's magnet link, info-hash or name. Save its `.torrent` file.
 - Make a `.torrent` from a file or folder: trackers in tiers, piece size, comment, private flag, and start seeding it straight away.
-- Downloads go in order: files one after another by name, each from its start to its end (the first and last piece of a file come first, so a player can read its index). This is how the engine always works, so it cannot be switched off.
+- Downloads go in order: high-priority files first, then normal, then low, by name within each, each file from its start to its end (the first and last piece of a file come first, so a player can read its index). This is how the engine works, so it cannot be switched off.
 - Torrents carry on after the app is restarted. The app warns before quitting while downloads are running.
 
 Limits
 
-- Global download and upload speed limits, and "slow mode": a second set of limits switched from the status bar or by its own schedule.
+- Global download and upload speed limits, limits for one torrent (in its details), and "slow mode": a second set of limits switched from the status bar or by its own schedule.
 - Queue: how many torrents download at once, seed at once, and are active at once; slow torrents can be left out of the count. Reorder from the right-click menu.
 - Stop seeding at a ratio (for all torrents or for one), after a seeding time, or after a time without upload.
 - Peers per torrent.
@@ -152,7 +153,9 @@ cargo test --workspace
 - Without "Use HTTPS", remote control is not encrypted: on "Allow other devices", the password and everything else travel in the clear. With HTTPS the certificate is self-made and names only `localhost` and the loopback addresses, so a phone's browser warns about it. Do not open the port to the internet either way.
 - Remote control does not follow the chosen network interface: with a VPN interface chosen it still answers on the normal network.
 - The remote page cannot see or set slow mode, the seeding limits or the queue limits. It was tested in one desktop browser, not on a real phone; uploading a valid `.torrent` file, the Files dialog and HTTPS were checked by automated tests only.
-- Moving a torrent's data, force recheck, force reannounce, per-torrent speed limits, file priorities and switching in-order download off are missing because the engine cannot do them.
+- Switching in-order download off is missing: the engine cannot do it without a large change.
+- Recheck, reannounce, per-torrent limits and file priorities come from a patched copy of the engine (librqbit), pinned in `Cargo.toml`, until the changes are accepted upstream.
+- While a torrent's data is being moved it cannot be removed, and its transfers stop until the move ends.
 - A torrent stopped by a seeding time limit stays stopped when resumed, until the limit is raised.
 - The proxy password is kept as plain text in the settings file. The block list is read only when the engine starts. Changing a network setting restarts the engine, which interrupts transfers for a moment.
 - The finish notification was never seen: macOS refused notification permission to the locally signed app on the test Mac. Keeping the Mac awake was not confirmed by measurement. The proxy and the block list were checked by automated tests only.

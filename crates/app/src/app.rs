@@ -4,7 +4,9 @@ use std::sync::Arc;
 
 use eframe::egui::{self, Color32, RichText, Sense};
 use egui_extras::{Column, TableBuilder};
-use rusttorrent_core::{format, manage, Command, Core, Feed, HoldReason, Move, Schedule, Snapshot, State, TorrentView};
+use rusttorrent_core::{
+    format, manage, Command, Core, Feed, HoldReason, Move, Priority, Schedule, Snapshot, State, TorrentView,
+};
 
 mod limits;
 
@@ -14,7 +16,7 @@ fn color(state: State) -> Color32 {
         State::Seeding => Color32::from_rgb(52, 199, 123),
         State::Paused => Color32::from_rgb(150, 150, 158),
         State::Queued | State::Scheduled => Color32::from_rgb(170, 140, 235),
-        State::FetchingInfo | State::Checking => Color32::from_rgb(230, 170, 60),
+        State::FetchingInfo | State::Checking | State::Moving => Color32::from_rgb(230, 170, 60),
         State::Completed => Color32::from_rgb(120, 200, 190),
         State::Blocked | State::Error => Color32::from_rgb(240, 90, 90),
     })
@@ -743,6 +745,9 @@ impl App {
                 ui.add(egui::Label::new(t.tags.join(", ")).truncate());
             }
         });
+        if !t.is_pending() {
+            self.torrent_limits(ui, t);
+        }
         ui.horizontal(|ui| {
             ui.label(RichText::new("Saved to").weak());
             ui.add(egui::Label::new(&t.save_path).truncate());
@@ -760,6 +765,62 @@ impl App {
         });
     }
 
+    /// This torrent's own speed limits. They apply on top of the global ones.
+    fn torrent_limits(&mut self, ui: &mut egui::Ui, t: &TorrentView) {
+        let id = egui::Id::unique(("torrent-limits", &t.key));
+        let saved = (t.down_limit_kib, t.up_limit_kib);
+        // What is typed or dragged is kept here until it is sent and comes back.
+        let mut value: (u32, u32) = ui.data(|d| d.get_temp(id)).unwrap_or(saved);
+        let field = |ui: &mut egui::Ui, n: &mut u32| {
+            ui.add(
+                egui::DragValue::new(n)
+                    .speed(10.0)
+                    .range(0..=10_000_000)
+                    .custom_formatter(|n, _| {
+                        if n == 0.0 {
+                            "No limit".to_owned()
+                        } else {
+                            format!("{n} KiB/s")
+                        }
+                    })
+                    .custom_parser(|text| {
+                        let text = text.trim().to_lowercase();
+                        if text.is_empty() || text.starts_with("no") {
+                            return Some(0.0);
+                        }
+                        text.trim_end_matches("kib/s").trim().parse::<f64>().ok()
+                    }),
+            )
+        };
+        let responses = ui
+            .horizontal(|ui| {
+                ui.label(RichText::new("Download limit").weak());
+                let down = field(ui, &mut value.0);
+                ui.add_space(20.0);
+                ui.label(RichText::new("Upload limit").weak());
+                let up = field(ui, &mut value.1);
+                [down, up]
+            })
+            .inner;
+        let busy = responses.iter().any(|r| r.dragged() || r.has_focus());
+        let commit = responses
+            .iter()
+            .any(|r| r.drag_stopped() || r.lost_focus() || (r.changed() && !busy));
+        if commit && value != saved {
+            self.core.send(Command::SetTorrentLimits {
+                keys: vec![t.key.clone()],
+                down_kib: value.0,
+                up_kib: value.1,
+            });
+        }
+        if !busy && value == saved {
+            ui.data_mut(|d| d.remove::<(u32, u32)>(id));
+        } else {
+            // Kept until the new limits come back from the engine, so the field does not jump.
+            ui.data_mut(|d| d.insert_temp(id, value));
+        }
+    }
+
     fn files(&mut self, ui: &mut egui::Ui, t: &TorrentView) {
         let n = t.files.len();
         if n == 0 {
@@ -768,6 +829,7 @@ impl App {
         }
         let is_on = |i: usize| t.selected.as_ref().is_none_or(|s| s.contains(&i));
         let mut change: Option<Vec<usize>> = None;
+        let mut priority: Option<(usize, Priority)> = None;
         ui.horizontal(|ui| {
             let chosen = t.selected.as_ref().map_or(n, |s| s.len());
             ui.label(RichText::new(format!("{chosen} of {n} files chosen for download")).weak());
@@ -777,9 +839,12 @@ impl App {
         });
         if n > 1 || t.done < t.total {
             ui.label(
-                RichText::new("Downloads in order: files one after another by name, each from its start to its end.")
-                    .small()
-                    .weak(),
+                RichText::new(
+                    "Downloads in order: high-priority files first, then normal, then low, by name within each, \
+                     each file from its start to its end.",
+                )
+                .small()
+                .weak(),
             );
         }
         egui::ScrollArea::vertical()
@@ -799,6 +864,17 @@ impl App {
                             (done as f64 / f.len as f64) as f32
                         };
                         ui.add(egui::ProgressBar::new(p).desired_width(110.0).desired_height(10.0));
+                        let now = t.priorities.get(i);
+                        egui::ComboBox::from_id_salt(("priority", i))
+                            .width(70.0)
+                            .selected_text(now.label())
+                            .show_ui(ui, |ui| {
+                                for p in Priority::ALL {
+                                    if ui.selectable_label(p == now, p.label()).clicked() && p != now {
+                                        priority = Some((i, p));
+                                    }
+                                }
+                            });
                         ui.add_sized(
                             [70.0, 18.0],
                             egui::Label::new(RichText::new(format::bytes(f.len)).weak()),
@@ -807,6 +883,13 @@ impl App {
                     });
                 }
             });
+        if let Some((file, priority)) = priority {
+            self.core.send(Command::SetFilePriority {
+                key: t.key.clone(),
+                files: vec![file],
+                priority,
+            });
+        }
         if let Some(files) = change {
             if files.is_empty() {
                 // The engine needs at least one file. To stop everything, pause the torrent.
@@ -854,6 +937,7 @@ impl App {
         let mut ask_name: Option<(Vec<String>, bool)> = None;
         // Set when the menu asks to save a torrent's file: its key and name.
         let mut save_file: Option<(String, String)> = None;
+        let mut move_to: Option<(Vec<String>, String)> = None;
         let (categories, tags) = names_in_use(&snap);
         // Columns the user hid with a right-click on the header.
         let hidden = &snap.settings.comfort.hidden_columns;
@@ -1128,6 +1212,32 @@ impl App {
                             });
                         });
                         ui.separator();
+                        let live = !t.is_pending() && t.state != State::Moving;
+                        if ui
+                            .add_enabled(live, egui::Button::new("Recheck"))
+                            .on_hover_text("Check the data on disk again and download what is missing or wrong.")
+                            .clicked()
+                        {
+                            action = Some((Command::Recheck(key.clone()), false));
+                            ui.close();
+                        }
+                        if ui
+                            .add_enabled(live, egui::Button::new("Reannounce"))
+                            .on_hover_text("Ask the trackers for peers now, without waiting for the next time.")
+                            .clicked()
+                        {
+                            action = Some((Command::Reannounce(key.clone()), false));
+                            ui.close();
+                        }
+                        if ui
+                            .add_enabled(live, egui::Button::new("Move data…"))
+                            .on_hover_text("Move the downloaded files to another folder.")
+                            .clicked()
+                        {
+                            move_to = Some((key.clone(), t.save_path.clone()));
+                            ui.close();
+                        }
+                        ui.separator();
                         if ui.button("Remove…").clicked() {
                             action = Some((
                                 Command::Remove {
@@ -1193,6 +1303,11 @@ impl App {
         if sort != self.sort {
             self.sort = sort;
             self.dirty = true;
+        }
+        if let Some((keys, start)) = move_to {
+            if let Some(dir) = rfd::FileDialog::new().set_directory(start).pick_folder() {
+                self.core.send(Command::MoveData { keys, dir });
+            }
         }
         if let Some((key, name)) = save_file {
             let picked = rfd::FileDialog::new()

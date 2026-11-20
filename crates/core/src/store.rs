@@ -138,6 +138,13 @@ pub struct Record {
     pub force_start: bool,
     /// How long it has seeded, and its own seeding time limits.
     pub seeding: Seeding,
+    /// This torrent's own speed limits in KiB/s. 0 means no limit of its own.
+    pub down_limit_kib: u32,
+    pub up_limit_kib: u32,
+    /// Files set to high or low priority.
+    pub priorities: crate::priority::FilePriorities,
+    /// A move of its data to another folder that has not ended yet.
+    pub moving: Option<crate::relocate::MoveNote>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
@@ -320,6 +327,18 @@ mod tests {
                     secs: 90,
                     idle_secs: 12,
                 },
+                down_limit_kib: 500,
+                up_limit_kib: 50,
+                priorities: crate::priority::FilePriorities {
+                    high: vec![1],
+                    low: vec![0, 2],
+                },
+                moving: Some(crate::relocate::MoveNote {
+                    from: "/a".into(),
+                    to: "/b".into(),
+                    files: vec!["x/y.iso".into()],
+                    only_files: Some(vec![0]),
+                }),
             },
         );
         store.save().unwrap();

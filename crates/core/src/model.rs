@@ -13,6 +13,8 @@ pub enum State {
     FetchingInfo,
     /// Checking files already on disk.
     Checking,
+    /// Its data is being moved to another folder.
+    Moving,
     Downloading,
     Seeding,
     /// Paused before the download finished.
@@ -34,6 +36,7 @@ impl State {
         match self {
             State::FetchingInfo => "Fetching info",
             State::Checking => "Checking",
+            State::Moving => "Moving",
             State::Downloading => "Downloading",
             State::Seeding => "Seeding",
             State::Paused => "Paused",
@@ -97,6 +100,11 @@ pub struct TorrentView {
     /// Downloads even when the queue is full.
     pub force_start: bool,
     pub limits: TorrentLimits,
+    /// This torrent's own speed limits in KiB/s. 0 means no limit of its own.
+    pub down_limit_kib: u32,
+    pub up_limit_kib: u32,
+    /// Files set to high or low priority.
+    pub priorities: crate::priority::FilePriorities,
 }
 
 impl TorrentView {

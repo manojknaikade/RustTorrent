@@ -15,3 +15,9 @@ opt-level = 3
 lto = "fat"
 codegen-units = 1
 strip = true
+
+# librqbit 9.1.0 with recheck, reannounce, file order and per-torrent speed limits added.
+# Each change is offered upstream on its own; this branch of the fork joins them.
+# https://github.com/manojknaikade/rqbit/tree/rusttorrent
+[patch.crates-io]
+librqbit = { git = "https://github.com/manojknaikade/rqbit", rev = "5a049012b2437d719a5ab15c2e470cf5b0b1e9dc" }
