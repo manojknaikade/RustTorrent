@@ -4,7 +4,7 @@ A torrent client for the Mac, written in Rust. It can be compiled for Windows an
 
 It exists because Transmission hides a torrent's details in a small popup and qBittorrent is awkward to install on Apple Silicon. RustTorrent keeps everything about a torrent in the main window, and aims to stay small and fast: one binary, no web engine.
 
-Status: **0.12, early**. It installs with Homebrew and has been tested on real downloads. What it has and lacks next to qBittorrent is listed in [the comparison](docs/designs/qbittorrent-gap.md).
+Status: **0.13, early**. It installs with Homebrew and has been tested on real downloads. What it has and lacks next to qBittorrent is listed in [the comparison](docs/designs/qbittorrent-gap.md).
 
 ## Install
 
@@ -18,7 +18,7 @@ This puts RustTorrent in `/Applications`. Later versions arrive with `brew upgra
 
 To have magnet links in a browser open in RustTorrent, open Settings in the app: the last line says which app macOS uses for magnet links, with a button to change it to RustTorrent.
 
-## What works in 0.12
+## What works in 0.13
 
 Adding
 
@@ -49,7 +49,7 @@ Limits
 
 Network
 
-- Listening port, and switches for UPnP, DHT and local peer discovery.
+- Listening port, and switches for UPnP, DHT and local peer discovery. What the DHT learns is kept in the app's own data folder.
 - SOCKS5 proxy.
 - IP block list, and "ban this peer" in the peers view.
 - Network interface binding, for use with a VPN: choose one interface in Settings and all torrent traffic and feed reading goes through it. When that interface is not connected, the torrent engine is stopped, so nothing is sent or received until it is back; the window shows a red banner saying so.

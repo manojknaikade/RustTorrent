@@ -8,7 +8,7 @@ use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
-use librqbit::{ConnectionOptions, ListenerOptions, SessionOptions};
+use librqbit::{ConnectionOptions, ListenerOptions};
 use serde::{Deserialize, Serialize};
 
 use crate::blocklist;
@@ -214,11 +214,7 @@ pub(crate) async fn prepare(
     };
     Ok(Prepared {
         listen,
-        dht: if settings.dht {
-            SessionOptions::default().dht
-        } else {
-            None
-        },
+        dht: settings.dht.then(|| dht_config(data_dir)),
         disable_local_service_discovery: !settings.local_discovery,
         connect,
         blocklist_url,
@@ -229,6 +225,22 @@ pub(crate) async fn prepare(
         },
     })
 }
+
+/// The engine's DHT options. The engine keeps what the DHT learned, its port among it, in
+/// one file per computer user by default, so two copies of the app would both try that
+/// port. Keeping the file in the app's own data folder gives each copy its own.
+fn dht_config(data_dir: &Path) -> librqbit::DhtSessionConfig {
+    librqbit::DhtSessionConfig {
+        persistence: Some(librqbit::dht::DhtPersistenceConfig {
+            config_filename: Some(data_dir.join(DHT_FILE)),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+/// The DHT state file, in the data folder.
+const DHT_FILE: &str = "dht.json";
 
 /// Reads the chosen block list, adds the banned peers and writes the result where the
 /// engine reads it. No file and no address for it when nothing is blocked.
@@ -267,6 +279,7 @@ fn write_blocklist(settings: &NetworkSettings, data_dir: &Path) -> anyhow::Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+    use librqbit::SessionOptions;
 
     fn proxy() -> ProxySettings {
         ProxySettings {
@@ -285,6 +298,14 @@ mod tests {
         assert!(s.upnp && s.dht && s.local_discovery);
         assert_eq!(s.port, 0);
         assert!(!s.proxy.enabled);
+    }
+
+    #[test]
+    fn dht_state_lives_in_the_data_folder() {
+        let dir = PathBuf::from("/data/a");
+        let config = dht_config(&dir);
+        let file = config.persistence.and_then(|p| p.config_filename);
+        assert_eq!(file, Some(dir.join("dht.json")));
     }
 
     #[test]
