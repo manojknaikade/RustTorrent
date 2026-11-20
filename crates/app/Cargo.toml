@@ -7,8 +7,20 @@ license.workspace = true
 
 [dependencies]
 rusttorrent-core = { path = "../core" }
-eframe = "0.37"
-egui_extras = "0.37"
+# The OpenGL renderer (glow) instead of the default wgpu: a few megabytes smaller and
+# plenty for a list of torrents. Linux window systems stay so the portable check builds.
+eframe = { version = "0.37", default-features = false, features = [
+    "accesskit",
+    "clipboard",
+    "default_fonts",
+    "glow",
+    "links",
+    "system_fonts",
+    "wayland",
+    "x11",
+] }
+# Only the table; the default file loader is not used.
+egui_extras = { version = "0.37", default-features = false }
 rfd = "0.18"
 png = { version = "0.18", optional = true }
 
