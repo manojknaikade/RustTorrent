@@ -8,6 +8,12 @@ version = "0.13.3"
 edition = "2021"
 license = "MIT"
 
+# ring is plain Rust in parts. Unoptimised, one remote-control password check takes
+# over a second (measured 1.4 s, against 76 ms optimised), which is slower than the
+# one-try-a-second login limit that the tests check.
+[profile.dev.package.ring]
+opt-level = 3
+
 # Speed first, then size. Panics unwind (no `panic = "abort"`) so one failing task
 # cannot take the whole app down.
 [profile.release]
@@ -20,7 +26,7 @@ strip = true
 # translation and GPU setup (mostly run once at start), image decoders, regular
 # expressions, JSON, HTTP for trackers and feeds, accessibility, dialogs and windowing.
 # Together this is about 740 KB smaller (measured on 0.13.3). tokio, librqbit, rustls,
-# aws-lc, egui and epaint stay at opt-level 3.
+# ring, egui and epaint stay at opt-level 3.
 [profile.release.package.naga]
 opt-level = "s"
 [profile.release.package.wgpu-core]
@@ -36,8 +42,6 @@ opt-level = "s"
 [profile.release.package.zune-jpeg]
 opt-level = "s"
 [profile.release.package.regex-automata]
-opt-level = "s"
-[profile.release.package.regex-syntax]
 opt-level = "s"
 [profile.release.package.serde_json]
 opt-level = "s"
@@ -60,8 +64,9 @@ opt-level = "s"
 [profile.release.package.winit]
 opt-level = "s"
 
-# librqbit 9.1.0 with recheck, reannounce, file order and per-torrent speed limits added.
+# librqbit 9.1.0 with recheck, reannounce, file order and per-torrent speed limits added,
+# regex-lite in place of regex, and a rustls feature with no crypto library built in.
 # Each change is offered upstream on its own; this branch of the fork joins them.
 # https://github.com/manojknaikade/rqbit/tree/rusttorrent
 [patch.crates-io]
-librqbit = { git = "https://github.com/manojknaikade/rqbit", rev = "5a049012b2437d719a5ab15c2e470cf5b0b1e9dc" }
+librqbit = { git = "https://github.com/manojknaikade/rqbit", rev = "ac2921cf5549b78e1a31d37e8752081fbe76cdb2" }

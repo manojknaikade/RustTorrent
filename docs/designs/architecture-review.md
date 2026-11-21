@@ -4,19 +4,19 @@ Reviewed version 0.13.3 (commit `9f31d2e`) on Apple Silicon (10 cores), 21 Novem
 
 ## Do these three first
 
-All three are now done; see "Results after the changes". The app is 16.43 MiB, measured. Seeding footprint was 52 MB, so the README's 104 MB was most likely RSS. M2 was tried and dropped.
+All three are now done; see "Results after the changes". So are the two fork changes, Z3 and Z4. The app is 14.12 MiB, measured. Seeding footprint was 52 MB, so the README's 104 MB was most likely RSS. M2 was tried and dropped.
 
 1. **Build cold crates for size** (Z1). This is one block in the workspace `Cargo.toml`. It cuts the binary from 17.49 MiB to 16.78 MiB, measured. No other size change is this cheap.
 2. **Measure seeding memory with `footprint` before you change anything for memory.** At idle with the window open, the footprint is 43 MB, measured. RSS is 90 MB, because RSS also counts shared system libraries. The README's "about 104 MB while seeding" doesn't say which number it is. If it was RSS, the 100 MB target may already be met. After measuring, lower the default peer count (M2). That's the one large memory lever in this repo.
 3. **Drop the clipboard's image decoders on macOS** (Z2). This saves about 0.54 MB, estimated from measured symbol sizes, and needs no fork change. With Z1 the app would be about 16.3 MiB.
 
-This repo alone can't get under 15 MiB. Getting there needs two fork changes: regex-lite in librqbit (Z3, about 0.57 MB) and ring instead of aws-lc (Z4, about 1.1 MB). Both are estimates. With all four the app would be about 14.7 MiB, also an estimate.
+This repo alone can't get under 15 MiB. Getting there needs two fork changes: regex-lite in librqbit (Z3, about 0.57 MB) and ring instead of aws-lc (Z4, about 1.1 MB). Both are estimates. With all four the app would be about 14.7 MiB, also an estimate. **Measured after doing all four: 14.12 MiB.** Z3 saved 0.95 MiB and Z4 1.36 MiB.
 
 ## Results after the changes
 
 Done on the `engine-features` branch after the review, not yet released. 127 tests pass and clippy shows no warnings.
 
-**Size: 17.49 → 16.43 MiB** (18,336,912 → 17,230,096 bytes, measured). Z1 with the quick wins gave 17,611,328 bytes. Z2 saved another 381,264 bytes, less than the 0.54 MB estimate.
+**Size: 17.49 → 14.12 MiB** (18,336,912 → 14,810,832 bytes, measured). Z1 with the quick wins gave 17,611,328 bytes. Z2 saved another 381,264 bytes, less than the 0.54 MB estimate, for 17,230,096 bytes. Z3 then gave 16,237,328 bytes and Z4 14,810,832 bytes.
 
 | ID | Status | What was done, and the evidence |
 | --- | --- | --- |
@@ -34,6 +34,8 @@ Done on the `engine-features` branch after the review, not yet released. 127 tes
 | M5 | Measured | `heap -s` while seeding: 14.3 MB live, of which 8.0 MB is untyped (Rust and C allocations). The rest belongs to macOS frameworks (Metal, AppKit, CoreFoundation). No font or cache change is worth making on this evidence. |
 | uTP | Done | Network setting "Also connect over uTP (UDP)", off by default. It's greyed out while a proxy is on, because uTP would go around the proxy. Test `utp_is_used_only_when_on_and_there_is_no_proxy`. |
 | M2 | Tried, dropped | See the runs below. Seeding footprint was the same, and 60 peers was slower in 2 of 3 runs. |
+| Z3 | Done in the fork | Fork branch `feat/regex-lite`: `only_files_regex` uses `regex_lite::Regex`. `cargo tree -i regex` finds nothing now. 992,768 bytes smaller, measured, against the 0.57 MB estimate. regex-automata is still in the build through `bstr` in `librqbit-lsd`. |
+| Z4 | Done in the fork and in core | Fork branch `feat/rustls-no-provider` adds a librqbit feature with reqwest's `rustls-no-provider`. Core uses rustls and tokio-rustls with `ring`, and `use_ring()` (`lib.rs`) installs ring's provider before any session or HTTP client is made. The certificate, the remote-control password hash and the fingerprint use ring. `cargo tree -i aws-lc-rs` finds nothing now. 1,426,496 bytes smaller, measured, against the 1.1 MB estimate. One HTTPS feed fetch through the app's client worked. **Two costs.** First, rustls with ring has no post-quantum key exchange: it offers X25519, P-256 and P-384 only (rustls 0.23.46 source). Second, ring's SHA-1 is plain Rust: 436 MiB/s against aws-lc's 2,464 MiB/s, measured. So torrent making (`make.rs`) now hashes with `crypto-hash`, which the engine already uses: 2,496 MiB/s on macOS, measured. Unoptimised, ring's PBKDF2 took 1.4 s against 76 ms optimised, which broke the login-limit test. ring is now built optimised in debug builds too. |
 | S7 | Tried, dropped | With 4 workers: 11 threads instead of 18, the same seeding footprint (50 MB), and higher seeding CPU (0.46% against 0.32%). One run only. No gain worth the recheck risk. |
 
 Debian runs with the M2 and S7 builds (one run each unless marked):
@@ -76,7 +78,7 @@ Memory with the final build, measured while seeding: footprint 49–53 MB, seedi
  │   ├─ librqbit Session (fork 5a049012): peers, DHT, UPnP, LSD, trackers,     │
  │   │    fastresume JSON in data_dir/session, blocklist from file:// URL      │
  │   ├─ feeds: reqwest fetch → quick-xml → regex-lite rules → add              │
- │   ├─ remote: hand-written HTTP/1.1 server, optional TLS (rustls, aws-lc)    │
+ │   ├─ remote: hand-written HTTP/1.1 server, optional TLS (rustls, ring)      │
  │   ├─ store.rs: JSON, atomic (tmp + fsync + rename), on events + 30 s        │
  │   └─ spawn_blocking: blocklist prep, file reads, .torrent making            │
  └─────────────────────────────────────────────────────────────────────────────┘
@@ -195,8 +197,8 @@ Z2 (macOS clipboard), M6 (shared speed history), S2 and S3 (tick caches), and fe
 - **Memory:** no change measured. The M2 saving didn't show up in the runs. A menu-bar mode might lower memory while the window is hidden; that is unmeasured.
 
 ### Later (large, or needs fork work)
-Z3 (regex-lite in the fork), Z4 (ring in the fork and in core), Z5 (optional chardetng), the qBittorrent-compatible API, import from other clients, NAT-PMP, and features 14–18.
-- **Size:** from the measured 16.43 MiB, about 15.9 MiB after Z3 and about 14.8 MiB after Z4, both estimated. Z4 is the step that gets under 15 MiB. Z5 would bring it to about 14.5 MiB.
+Z3 (regex-lite in the fork), Z4 (ring in the fork and in core), Z5 (optional chardetng), the qBittorrent-compatible API, import from other clients, NAT-PMP, and features 14–18. **Z3 and Z4 are done.**
+- **Size:** 16.43 → 15.49 MiB after Z3 and 14.12 MiB after Z4, measured. Under 15 MiB. Z5 might take off about 0.3 MiB more, estimated.
 - **Memory:** no change expected.
 
 ## 6. Things not to do
@@ -211,7 +213,7 @@ Z3 (regex-lite in the fork), Z4 (ring in the fork and in core), Z5 (optional cha
 | Drop `default_fonts` | It would save about 0.67 MB, measured (the Hack, Ubuntu-Light and icon fonts). But it changes the look and relies on finding a good system font. Consider it only after M5, with a system font measured as the main font. |
 | Compact JSON instead of pretty JSON in `store.rs` | Saves happen at most every 30 s, and only when something changed. A readable settings file helps support more than the bytes would. |
 | mimalloc or another allocator | Idle CPU is already 0%, and the 60 s page return handles fragmentation on macOS. A new allocator adds size and makes `malloc_zone_pressure_relief` useless. Reconsider only if the seeding measurement shows fragmentation. |
-| `-C target-cpu=apple-m1` | The hot hashing code is already hand-written assembly in aws-lc (or ring) that picks the CPU at runtime. It would also rule out Intel builds. |
+| `-C target-cpu=apple-m1` | The hot hashing (piece SHA-1) runs in the system's crypto library through crypto-hash, not in Rust code, so the flag would not reach it. It would also rule out Intel builds. |
 | Search plugins | Ruled out in qbittorrent-gap.md:103. They need a Python runtime or a plugin host, which breaks "one binary". |
 | Check for updates in the app | `brew upgrade` already does this (qbittorrent-gap.md:91). |
 | Replace librqbit | The fork already carries recheck, reannounce, per-torrent limits and file priorities. Each gap above is a contained fork change, which is much cheaper than replacing the engine. |

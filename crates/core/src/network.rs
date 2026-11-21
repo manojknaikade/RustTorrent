@@ -533,6 +533,7 @@ mod tests {
         };
         let p = prepare(&s, None, &dir).await.unwrap();
         assert_eq!(p.status.blocked_ranges, 1);
+        crate::use_ring();
         let session = librqbit::Session::new_with_opts(
             dir.clone(),
             SessionOptions {

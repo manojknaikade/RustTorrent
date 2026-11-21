@@ -618,6 +618,7 @@ impl Worker {
         // Read before the session starts: if the interface is replaced while it starts,
         // the next look sees a different number and starts again.
         let index = bind.as_deref().and_then(net::index);
+        crate::use_ring();
         let session = Session::new_with_opts(settings.download_dir.clone(), options).await?;
         self.http = http_client(bind.as_deref(), network.proxy.url().as_deref());
         let status = crate::network::NetworkStatus {
@@ -1640,7 +1641,11 @@ impl Worker {
                 let record = &self.store.data.torrents[&key];
                 torrents.push(TorrentView {
                     // The first pass above copied the name into the record once it was known.
-                    name: if record.name.is_empty() { key.clone() } else { record.name.clone() },
+                    name: if record.name.is_empty() {
+                        key.clone()
+                    } else {
+                        record.name.clone()
+                    },
                     state,
                     error: stats.error.clone(),
                     total: stats.total_bytes,
@@ -1872,6 +1877,7 @@ fn peers_of(handle: &Handle) -> Vec<PeerView> {
 /// cannot be tied to it: then feeds are not read at all rather than read some other way.
 /// Feeds go through the proxy when one is set.
 fn http_client(bind: Option<&str>, proxy: Option<&str>) -> Option<reqwest::Client> {
+    crate::use_ring();
     let builder = reqwest::Client::builder()
         .user_agent(format!("RustTorrent/{}", crate::VERSION))
         .timeout(Duration::from_secs(30));

@@ -283,7 +283,13 @@ impl Side {
         let count = |name: &String, tag: bool| {
             snap.torrents
                 .iter()
-                .filter(|t| if tag { t.tags.contains(name) } else { t.category.as_ref() == Some(name) })
+                .filter(|t| {
+                    if tag {
+                        t.tags.contains(name)
+                    } else {
+                        t.category.as_ref() == Some(name)
+                    }
+                })
                 .count()
         };
         Self {

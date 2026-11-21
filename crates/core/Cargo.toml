@@ -6,20 +6,24 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-librqbit = "=9.1.0"
+# No crypto library of librqbit's own: core installs ring for it (see `use_ring`).
+librqbit = { version = "=9.1.0", default-features = false, features = ["http-api-client", "rustls-no-provider"] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "net", "io-util"] }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 dirs = "6"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-# Already part of the build through reqwest; used for hashing the remote-control password.
-aws-lc-rs = "1"
-reqwest = { version = "0.13", default-features = false, features = ["rustls", "socks"] }
+# TLS for trackers, feeds and the remote control, and the remote-control password
+# hash. Smaller than aws-lc.
+ring = "0.17"
+# The system's SHA-1, for making torrents. Already in the build: the engine hashes with it.
+crypto-hash = "0.3"
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "socks"] }
 regex-lite = "0.1"
 # Already part of the build through reqwest; used for the optional HTTPS of the remote control.
-rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "aws_lc_rs"] }
-tokio-rustls = { version = "0.26", default-features = false, features = ["tls12", "aws_lc_rs"] }
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["tls12", "ring"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

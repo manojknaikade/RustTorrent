@@ -130,15 +130,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "aho-corasick"
-version = "1.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c982642fa9e8606056828ee9a8505737230110bb1099153c79efe865c59d12ba"
-dependencies = [
- "memchr",
-]
-
-[[package]]
 name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -466,30 +457,6 @@ name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
-
-[[package]]
-name = "aws-lc-rs"
-version = "1.19.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "048006790404103c488e6c5616b3e7e702a71292aadda08e8f7698a9e0d2eb53"
-dependencies = [
- "aws-lc-sys",
- "untrusted 0.7.1",
- "zeroize",
-]
-
-[[package]]
-name = "aws-lc-sys"
-version = "0.47.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8bfbe32ac36b3c428696ce315464181bc4029d689fd58e3f2a4e58c252242f52"
-dependencies = [
- "cc",
- "cmake",
- "dunce",
- "fs_extra",
- "pkg-config",
-]
 
 [[package]]
 name = "axum"
@@ -844,15 +811,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cmake"
-version = "0.1.58"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c0f78a02292a74a88ac736019ab962ece0bc380e3f977bf72e376c5d78ff0678"
-dependencies = [
- "cc",
-]
-
-[[package]]
 name = "codespan-reporting"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1203,12 +1161,6 @@ name = "dpi"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
-
-[[package]]
-name = "dunce"
-version = "1.0.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
 
 [[package]]
 name = "dyn-clone"
@@ -1675,12 +1627,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fs_extra"
-version = "1.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "42703706b716c37f96a77aea830392ad231f44c9e9a67872fa5548707e11b11c"
-
-[[package]]
 name = "funty"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1819,10 +1765,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ff2abc00be7fca6ebc474524697ae276ad847ad0a6b3faa4bcb027e9a4614ad0"
 dependencies = [
  "cfg-if",
- "js-sys",
  "libc",
  "wasi",
- "wasm-bindgen",
 ]
 
 [[package]]
@@ -1846,11 +1790,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "300e883d756b2e4ec94e02791f39b04b522276138852cfc41d9fb7e904106099"
 dependencies = [
  "cfg-if",
- "js-sys",
  "libc",
  "r-efi 6.0.0",
  "rand_core 0.10.1",
- "wasm-bindgen",
 ]
 
 [[package]]
@@ -2619,7 +2561,7 @@ dependencies = [
 [[package]]
 name = "librqbit"
 version = "9.1.0"
-source = "git+https://github.com/manojknaikade/rqbit?rev=5a049012b2437d719a5ab15c2e470cf5b0b1e9dc#5a049012b2437d719a5ab15c2e470cf5b0b1e9dc"
+source = "git+https://github.com/manojknaikade/rqbit?rev=ac2921cf5549b78e1a31d37e8752081fbe76cdb2#ac2921cf5549b78e1a31d37e8752081fbe76cdb2"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2656,7 +2598,7 @@ dependencies = [
  "nix",
  "parking_lot",
  "rand 0.10.3",
- "regex",
+ "regex-lite",
  "reqwest",
  "rlimit",
  "serde",
@@ -2682,7 +2624,7 @@ dependencies = [
 [[package]]
 name = "librqbit-bencode"
 version = "9.1.0"
-source = "git+https://github.com/manojknaikade/rqbit?rev=5a049012b2437d719a5ab15c2e470cf5b0b1e9dc#5a049012b2437d719a5ab15c2e470cf5b0b1e9dc"
+source = "git+https://github.com/manojknaikade/rqbit?rev=ac2921cf5549b78e1a31d37e8752081fbe76cdb2#ac2921cf5549b78e1a31d37e8752081fbe76cdb2"
 dependencies = [
  "anyhow",
  "arrayvec",
@@ -2698,7 +2640,7 @@ dependencies = [
 [[package]]
 name = "librqbit-buffers"
 version = "9.1.0"
-source = "git+https://github.com/manojknaikade/rqbit?rev=5a049012b2437d719a5ab15c2e470cf5b0b1e9dc#5a049012b2437d719a5ab15c2e470cf5b0b1e9dc"
+source = "git+https://github.com/manojknaikade/rqbit?rev=ac2921cf5549b78e1a31d37e8752081fbe76cdb2#ac2921cf5549b78e1a31d37e8752081fbe76cdb2"
 dependencies = [
  "bytes",
  "librqbit-clone-to-owned",
@@ -2709,7 +2651,7 @@ dependencies = [
 [[package]]
 name = "librqbit-clone-to-owned"
 version = "9.1.0"
-source = "git+https://github.com/manojknaikade/rqbit?rev=5a049012b2437d719a5ab15c2e470cf5b0b1e9dc#5a049012b2437d719a5ab15c2e470cf5b0b1e9dc"
+source = "git+https://github.com/manojknaikade/rqbit?rev=ac2921cf5549b78e1a31d37e8752081fbe76cdb2#ac2921cf5549b78e1a31d37e8752081fbe76cdb2"
 dependencies = [
  "bytes",
 ]
@@ -2717,7 +2659,7 @@ dependencies = [
 [[package]]
 name = "librqbit-core"
 version = "9.1.0"
-source = "git+https://github.com/manojknaikade/rqbit?rev=5a049012b2437d719a5ab15c2e470cf5b0b1e9dc#5a049012b2437d719a5ab15c2e470cf5b0b1e9dc"
+source = "git+https://github.com/manojknaikade/rqbit?rev=ac2921cf5549b78e1a31d37e8752081fbe76cdb2#ac2921cf5549b78e1a31d37e8752081fbe76cdb2"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2746,7 +2688,7 @@ dependencies = [
 [[package]]
 name = "librqbit-dht"
 version = "9.1.0"
-source = "git+https://github.com/manojknaikade/rqbit?rev=5a049012b2437d719a5ab15c2e470cf5b0b1e9dc#5a049012b2437d719a5ab15c2e470cf5b0b1e9dc"
+source = "git+https://github.com/manojknaikade/rqbit?rev=ac2921cf5549b78e1a31d37e8752081fbe76cdb2#ac2921cf5549b78e1a31d37e8752081fbe76cdb2"
 dependencies = [
  "anyhow",
  "backon",
@@ -2793,7 +2735,7 @@ dependencies = [
 [[package]]
 name = "librqbit-lsd"
 version = "9.1.0"
-source = "git+https://github.com/manojknaikade/rqbit?rev=5a049012b2437d719a5ab15c2e470cf5b0b1e9dc#5a049012b2437d719a5ab15c2e470cf5b0b1e9dc"
+source = "git+https://github.com/manojknaikade/rqbit?rev=ac2921cf5549b78e1a31d37e8752081fbe76cdb2#ac2921cf5549b78e1a31d37e8752081fbe76cdb2"
 dependencies = [
  "anyhow",
  "atoi",
@@ -2812,7 +2754,7 @@ dependencies = [
 [[package]]
 name = "librqbit-peer-protocol"
 version = "9.1.0"
-source = "git+https://github.com/manojknaikade/rqbit?rev=5a049012b2437d719a5ab15c2e470cf5b0b1e9dc#5a049012b2437d719a5ab15c2e470cf5b0b1e9dc"
+source = "git+https://github.com/manojknaikade/rqbit?rev=ac2921cf5549b78e1a31d37e8752081fbe76cdb2#ac2921cf5549b78e1a31d37e8752081fbe76cdb2"
 dependencies = [
  "anyhow",
  "bitvec",
@@ -2832,7 +2774,7 @@ dependencies = [
 [[package]]
 name = "librqbit-sha1-wrapper"
 version = "9.1.0"
-source = "git+https://github.com/manojknaikade/rqbit?rev=5a049012b2437d719a5ab15c2e470cf5b0b1e9dc#5a049012b2437d719a5ab15c2e470cf5b0b1e9dc"
+source = "git+https://github.com/manojknaikade/rqbit?rev=ac2921cf5549b78e1a31d37e8752081fbe76cdb2#ac2921cf5549b78e1a31d37e8752081fbe76cdb2"
 dependencies = [
  "assert_cfg",
  "crypto-hash",
@@ -2841,7 +2783,7 @@ dependencies = [
 [[package]]
 name = "librqbit-tracker-comms"
 version = "9.1.0"
-source = "git+https://github.com/manojknaikade/rqbit?rev=5a049012b2437d719a5ab15c2e470cf5b0b1e9dc#5a049012b2437d719a5ab15c2e470cf5b0b1e9dc"
+source = "git+https://github.com/manojknaikade/rqbit?rev=ac2921cf5549b78e1a31d37e8752081fbe76cdb2#ac2921cf5549b78e1a31d37e8752081fbe76cdb2"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2869,7 +2811,7 @@ dependencies = [
 [[package]]
 name = "librqbit-upnp"
 version = "9.1.0"
-source = "git+https://github.com/manojknaikade/rqbit?rev=5a049012b2437d719a5ab15c2e470cf5b0b1e9dc#5a049012b2437d719a5ab15c2e470cf5b0b1e9dc"
+source = "git+https://github.com/manojknaikade/rqbit?rev=ac2921cf5549b78e1a31d37e8752081fbe76cdb2#ac2921cf5549b78e1a31d37e8752081fbe76cdb2"
 dependencies = [
  "anyhow",
  "bstr",
@@ -2954,12 +2896,6 @@ name = "log"
 version = "0.4.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
-
-[[package]]
-name = "lru-slab"
-version = "0.1.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4050469837a6ff301cd14c1f8f24f88549e6d548f24f64e2148eb0f72cebc51f"
 
 [[package]]
 name = "matchit"
@@ -4011,63 +3947,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "quinn"
-version = "0.11.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4051e23e9185c255a7e33ef59cdbca87a22d359052eecd22fc6b901fb37d9d11"
-dependencies = [
- "bytes",
- "cfg_aliases",
- "pin-project-lite",
- "quinn-proto",
- "quinn-udp",
- "rustc-hash 2.1.3",
- "rustls",
- "socket2",
- "thiserror 2.0.21",
- "tokio",
- "tracing",
- "web-time",
-]
-
-[[package]]
-name = "quinn-proto"
-version = "0.11.19"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0e750cca55fe4f0439a15d0bb529da9651e79993e8e72c61a899a36d462befbe"
-dependencies = [
- "aws-lc-rs",
- "bytes",
- "getrandom 0.4.3",
- "lru-slab",
- "rand 0.10.3",
- "rand_pcg",
- "ring",
- "rustc-hash 2.1.3",
- "rustls",
- "rustls-pki-types",
- "slab",
- "thiserror 2.0.21",
- "tinyvec",
- "tracing",
- "web-time",
-]
-
-[[package]]
-name = "quinn-udp"
-version = "0.5.16"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "af66907df18639dcf4db56ca65490cabc4b27a97dbadd96f2926cca73298f016"
-dependencies = [
- "cfg_aliases",
- "libc",
- "once_cell",
- "socket2",
- "tracing",
- "windows-sys 0.61.2",
-]
-
-[[package]]
 name = "quote"
 version = "1.0.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4139,15 +4018,6 @@ name = "rand_core"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "63b8176103e19a2643978565ca18b50549f6101881c443590420e4dc998a3c69"
-
-[[package]]
-name = "rand_pcg"
-version = "0.10.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "caa0f4137e1c0a72f4c651489402276c8e8e1cf081f3b0ba156d2cbeef09e86a"
-dependencies = [
- "rand_core 0.10.1",
-]
 
 [[package]]
 name = "range-alloc"
@@ -4260,39 +4130,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "regex"
-version = "1.13.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f020237b6c8eed93db2e2cb53c00c60a8e1bc73da7d073199a1180401450218d"
-dependencies = [
- "aho-corasick",
- "memchr",
- "regex-automata",
- "regex-syntax",
-]
-
-[[package]]
 name = "regex-automata"
 version = "0.4.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ad8553b9b26413251cbf30e620595c7a41b3887f03da04579c0e6b0d6a06b4b2"
-dependencies = [
- "aho-corasick",
- "memchr",
- "regex-syntax",
-]
 
 [[package]]
 name = "regex-lite"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cab834c73d247e67f4fae452806d17d3c7501756d98c8808d7c9c7aa7d18f973"
-
-[[package]]
-name = "regex-syntax"
-version = "0.8.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "renderdoc-sys"
@@ -4320,7 +4167,6 @@ dependencies = [
  "log",
  "percent-encoding",
  "pin-project-lite",
- "quinn",
  "rustls",
  "rustls-pki-types",
  "rustls-platform-verifier",
@@ -4378,7 +4224,7 @@ dependencies = [
  "cfg-if",
  "getrandom 0.2.17",
  "libc",
- "untrusted 0.9.0",
+ "untrusted",
  "windows-sys 0.52.0",
 ]
 
@@ -4464,8 +4310,8 @@ version = "0.23.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
- "aws-lc-rs",
  "once_cell",
+ "ring",
  "rustls-pki-types",
  "rustls-webpki",
  "subtle",
@@ -4490,7 +4336,6 @@ version = "1.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "102f35f7de7b06d8c61f1cff6592f5253e0dea431c74867aad5dfd70f44663fb"
 dependencies = [
- "web-time",
  "zeroize",
 ]
 
@@ -4527,10 +4372,9 @@ version = "0.103.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3a0760a887c14823fca5a1c970b01d47c328c696c0c64829d1df50e8f853fd5"
 dependencies = [
- "aws-lc-rs",
  "ring",
  "rustls-pki-types",
- "untrusted 0.9.0",
+ "untrusted",
 ]
 
 [[package]]
@@ -4552,13 +4396,14 @@ name = "rusttorrent-core"
 version = "0.13.3"
 dependencies = [
  "anyhow",
- "aws-lc-rs",
  "chrono",
+ "crypto-hash",
  "dirs",
  "libc",
  "librqbit",
  "regex-lite",
  "reqwest",
+ "ring",
  "rustls",
  "serde",
  "serde_json",
@@ -5454,12 +5299,6 @@ name = "unicode-width"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ca718471876992059f251e33aafc334346ada08042b7661dd1fe313a9bced557"
-
-[[package]]
-name = "untrusted"
-version = "0.7.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a156c684c91ea7d62626509bce3cb4e1d9ed5c4d978f7b4352658f96a4c26b4a"
 
 [[package]]
 name = "untrusted"

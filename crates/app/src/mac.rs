@@ -3,11 +3,11 @@
 //! winit owns the application delegate and has no method for opened files, so one is added
 //! to its class just before the app finishes launching. Magnet links arrive as a "get URL"
 //! Apple Event, which is handled directly.
+use eframe::egui;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, Imp, Sel};
 use objc2::{class, define_class, msg_send, sel, AllocAnyThread};
 use objc2_foundation::{NSArray, NSNotification, NSObject, NSString, NSURL};
-use eframe::egui;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 extern "C-unwind" fn open_urls(_this: &AnyObject, _sel: Sel, _app: &AnyObject, urls: &NSArray<NSURL>) {
@@ -184,7 +184,13 @@ pub fn clipboard_keys(events: &mut Vec<egui::Event>) {
     use egui::{Event, Key};
     let mut out = Vec::with_capacity(events.len());
     for event in events.drain(..) {
-        if let Event::Key { key, pressed: true, modifiers, .. } = &event {
+        if let Event::Key {
+            key,
+            pressed: true,
+            modifiers,
+            ..
+        } = &event
+        {
             let cmd = modifiers.command_only();
             match key {
                 Key::C if cmd => {

@@ -27,8 +27,8 @@ use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use aws_lc_rs::pbkdf2;
-use aws_lc_rs::rand::{SecureRandom, SystemRandom};
+use ring::pbkdf2;
+use ring::rand::{SecureRandom, SystemRandom};
 use serde::Deserialize;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;

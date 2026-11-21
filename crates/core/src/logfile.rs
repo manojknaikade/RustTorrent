@@ -77,10 +77,16 @@ mod tests {
         log.line("second"); // 18
         log.line("third line"); // would be 29: rotate
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "third line\n");
-        assert_eq!(std::fs::read_to_string(dir.join("rusttorrent.log.1")).unwrap(), "first line\nsecond\n");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("rusttorrent.log.1")).unwrap(),
+            "first line\nsecond\n"
+        );
         log.line("fourth one"); // 22: rotate again, the oldest goes
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "fourth one\n");
-        assert_eq!(std::fs::read_to_string(dir.join("rusttorrent.log.1")).unwrap(), "third line\n");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("rusttorrent.log.1")).unwrap(),
+            "third line\n"
+        );
 
         // A file that is already too long when the app starts.
         drop(log);

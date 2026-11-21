@@ -44,6 +44,16 @@ pub use store::{RemoteSettings, Settings};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Makes ring the crypto library for every TLS connection. reqwest and librqbit are
+/// built without one of their own, and reqwest panics if it builds a client with
+/// none, so this runs before any session or HTTP client is made. Safe to call again.
+pub(crate) fn use_ring() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
 pub(crate) fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
