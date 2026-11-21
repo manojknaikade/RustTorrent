@@ -14,7 +14,7 @@ This repo alone can't get under 15 MiB. Getting there needs two fork changes: re
 
 ## Results after the changes
 
-Done on the `engine-features` branch after the review, not yet released. 127 tests pass and clippy shows no warnings.
+Released in 0.13.4. 127 tests pass and clippy shows no warnings.
 
 **Size: 17.49 → 14.12 MiB** (18,336,912 → 14,810,832 bytes, measured). Z1 with the quick wins gave 17,611,328 bytes. Z2 saved another 381,264 bytes, less than the 0.54 MB estimate, for 17,230,096 bytes. Z3 then gave 16,237,328 bytes and Z4 14,810,832 bytes.
 
@@ -24,7 +24,7 @@ Done on the `engine-features` branch after the review, not yet released. 127 tes
 | Z2 | Done, macOS only | eframe's `clipboard` feature is on only for other systems. ⌘C, ⌘X and ⌘V are handled in `mac.rs` through `NSPasteboard`. 381,264 bytes smaller, measured. **Copy and paste of a magnet link still needs a test by hand.** |
 | S1 | Not done | The finding was wrong (see "Biggest structural risks" #1). The idle snapshot already stays equal. |
 | M6 | Done | The speed history is an `Arc<SpeedHistory>` changed with `Arc::make_mut`, and is pushed only when the speed changed. Test `history_says_when_a_speed_would_change_it`. |
-| S2 | Done in part | Settings, feeds and notices are `Arc`s, replaced only when they change. The name comes from the stored record. The hex hash is still made each tick. |
+| S2 | Done; the last part dropped | Settings, feeds and notices are `Arc`s, replaced only when they change. The name comes from the stored record. The hex hash is still made each tick, on purpose: the view keeps the key as its own `String` (`model.rs:70`), so a cache would still copy one string per torrent per tick. It would only save hex-encoding 20 bytes. |
 | S3 | Done | `find` looks the torrent up by its 40-character hash through `Session::get`, with no scan. |
 | S4 | Done | Names are lower-cased once per `rebuild()`, not per comparison. |
 | S5 | Done | Sidebar counts are worked out in `rebuild()`. |
@@ -36,6 +36,9 @@ Done on the `engine-features` branch after the review, not yet released. 127 tes
 | M2 | Tried, dropped | See the runs below. Seeding footprint was the same, and 60 peers was slower in 2 of 3 runs. |
 | Z3 | Done in the fork | Fork branch `feat/regex-lite`: `only_files_regex` uses `regex_lite::Regex`. `cargo tree -i regex` finds nothing now. 992,768 bytes smaller, measured, against the 0.57 MB estimate. regex-automata is still in the build through `bstr` in `librqbit-lsd`. |
 | Z4 | Done in the fork and in core | Fork branch `feat/rustls-no-provider` adds a librqbit feature with reqwest's `rustls-no-provider`. Core uses rustls and tokio-rustls with `ring`, and `use_ring()` (`lib.rs`) installs ring's provider before any session or HTTP client is made. The certificate, the remote-control password hash and the fingerprint use ring. `cargo tree -i aws-lc-rs` finds nothing now. 1,426,496 bytes smaller, measured, against the 1.1 MB estimate. One HTTPS feed fetch through the app's client worked. **Two costs.** First, rustls with ring has no post-quantum key exchange: it offers X25519, P-256 and P-384 only (rustls 0.23.46 source). Second, ring's SHA-1 is plain Rust: 436 MiB/s against aws-lc's 2,464 MiB/s, measured. So torrent making (`make.rs`) now hashes with `crypto-hash`, which the engine already uses: 2,496 MiB/s on macOS, measured. Unoptimised, ring's PBKDF2 took 1.4 s against 76 ms optimised, which broke the login-limit test. ring is now built optimised in debug builds too. |
+| Z5 | Not done, by choice | Names of old torrents that aren't UTF-8 would show garbled. About 0.3 MB, estimated, isn't worth that. |
+| Z6 | Waiting | Nothing to do until accesskit and eframe move to objc2 0.6. |
+| Features 2–18 | Not started | Left for later releases, one at a time. |
 | S7 | Tried, dropped | With 4 workers: 11 threads instead of 18, the same seeding footprint (50 MB), and higher seeding CPU (0.46% against 0.32%). One run only. No gain worth the recheck risk. |
 
 Debian runs with the M2 and S7 builds (one run each unless marked):
@@ -192,12 +195,12 @@ Z1 (cold crates at `opt-level = "s"`), S4 (cached sort key), S5 (counts in `rebu
 - **Memory:** idle stays at about 43 MB footprint. Seeding: 49–53 MB footprint, measured, the same as 0.13.3.
 
 ### Next release (medium effort, clear payoff)
-Z2 (macOS clipboard), M6 (shared speed history), S2 and S3 (tick caches), and features 2–8. **Z2, M6, S2 (in part) and S3 are done.** S1 was wrong; M2 and S7 were tried and dropped.
+Z2 (macOS clipboard), M6 (shared speed history), S2 and S3 (tick caches), and features 2–8. **Z2, M6, S2 and S3 are done. Features 2–8 are not started.** S1 was wrong; M2 and S7 were tried and dropped.
 - **Size:** 16.43 MiB, measured. Still over 15 MiB.
 - **Memory:** no change measured. The M2 saving didn't show up in the runs. A menu-bar mode might lower memory while the window is hidden; that is unmeasured.
 
 ### Later (large, or needs fork work)
-Z3 (regex-lite in the fork), Z4 (ring in the fork and in core), Z5 (optional chardetng), the qBittorrent-compatible API, import from other clients, NAT-PMP, and features 14–18. **Z3 and Z4 are done.**
+Z3 (regex-lite in the fork), Z4 (ring in the fork and in core), Z5 (optional chardetng), the qBittorrent-compatible API, import from other clients, NAT-PMP, and features 14–18. **Z3 and Z4 are done. Z5 was skipped by choice. The rest is not started.**
 - **Size:** 16.43 → 15.49 MiB after Z3 and 14.12 MiB after Z4, measured. Under 15 MiB. Z5 might take off about 0.3 MiB more, estimated.
 - **Memory:** no change expected.
 

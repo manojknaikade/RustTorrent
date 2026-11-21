@@ -51,6 +51,7 @@ Limits
 Network
 
 - Listening port, and switches for UPnP, DHT and local peer discovery. What the DHT learns is kept in the app's own data folder.
+- uTP: also connect to peers over UDP. Off by default.
 - SOCKS5 proxy.
 - IP block list, and "ban this peer" in the peers view.
 - Network interface binding, for use with a VPN: choose one interface in Settings and all torrent traffic and feed reading goes through it. When that interface is not connected, the torrent engine is stopped, so nothing is sent or received until it is back; the window shows a red banner saying so.
@@ -70,16 +71,15 @@ Remote control
 
 ## Size and speed
 
-Measured on an Apple Silicon Mac with 0.12:
+Measured on an Apple Silicon Mac. Size with 0.13.4, the rest with 0.13.3:
 
 | | Measured | Target |
 | --- | --- | --- |
-| App on disk | 17 MB (8.5 MB zipped) | under 15 MB |
-| Memory with one finished 735 MB torrent seeding | about 104 MB | under 100 MB |
-| Processor at that time | about 0.5% | |
+| App on disk | 14 MB (6.8 MB zipped) | under 15 MB |
+| Memory with one finished 735 MB torrent seeding | 49–53 MB footprint | under 100 MB |
 | Test download (735 MB Debian image) | finished in under 25 seconds, checksum matched | |
 
-The app is 2 MB over its size target and a little over its memory target. Most of the size is the drawing library.
+Memory is the footprint that Activity Monitor shows, not the resident size. Older versions of this page gave the resident size (about 104 MB with 0.12), so the two numbers are not directly comparable. Most of the app's size is the drawing library.
 
 ## Planned
 
