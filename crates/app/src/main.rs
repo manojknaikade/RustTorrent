@@ -65,6 +65,12 @@ fn main() -> eframe::Result {
             .with_title("RustTorrent")
             .with_inner_size([1180.0, 760.0])
             .with_min_inner_size([860.0, 520.0]),
+        // One frame in flight instead of two: one window-sized buffer less, and a list
+        // of torrents has no GPU work to overlap.
+        wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
+            surface: eframe::egui_wgpu::SurfaceConfig::LOW_LATENCY,
+            ..Default::default()
+        },
         ..Default::default()
     };
     eframe::run_native(

@@ -100,6 +100,24 @@ pub fn install() {
         let _: () = msg_send![center, addObserver: &*observer, selector: sel!(willFinishLaunching:), name: &*name, object: std::ptr::null::<AnyObject>()];
     }
     std::mem::forget(observer); // lives for the whole run
+    give_back_memory();
+}
+
+unsafe extern "C" {
+    // libSystem. Hands pages that malloc holds but no longer uses back to the system.
+    fn malloc_zone_pressure_relief(zone: *mut std::ffi::c_void, goal: usize) -> usize;
+}
+
+/// macOS malloc keeps freed pages and counts them against the app, so after a busy
+/// moment (startup, a burst of peers) an idle app could hold 10 MB or more it no longer
+/// uses. Once a minute the pages go back; the call takes well under a millisecond.
+fn give_back_memory() {
+    let spawned = std::thread::Builder::new().name("memory".into()).spawn(|| loop {
+        std::thread::sleep(std::time::Duration::from_secs(60));
+        // A null zone means every zone; a goal of 0 means as much as possible.
+        unsafe { malloc_zone_pressure_relief(std::ptr::null_mut(), 0) };
+    });
+    drop(spawned);
 }
 
 /// The name macOS knows this app by. It must match the bundle's Info.plist.

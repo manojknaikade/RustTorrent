@@ -7,16 +7,17 @@ license.workspace = true
 
 [dependencies]
 rusttorrent-core = { path = "../core" }
-# The OpenGL renderer (glow) instead of the default wgpu: a few megabytes smaller and
-# plenty for a list of torrents. Linux window systems stay so the portable check builds.
+# The wgpu renderer (Metal on macOS). OpenGL (glow) made the binary 3 MB smaller but
+# took about 11 MB more memory at idle on macOS. Linux window systems stay so the
+# portable check builds.
 eframe = { version = "0.37", default-features = false, features = [
     "accesskit",
     "clipboard",
     "default_fonts",
-    "glow",
     "links",
     "system_fonts",
     "wayland",
+    "wgpu",
     "x11",
 ] }
 # Only the table; the default file loader is not used.
