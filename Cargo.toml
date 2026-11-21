@@ -16,6 +16,50 @@ lto = "fat"
 codegen-units = 1
 strip = true
 
+# Crates that are not on the download path are built for size instead: shader
+# translation and GPU setup (mostly run once at start), image decoders, regular
+# expressions, JSON, HTTP for trackers and feeds, accessibility, dialogs and windowing.
+# Together this is about 740 KB smaller (measured on 0.13.3). tokio, librqbit, rustls,
+# aws-lc, egui and epaint stay at opt-level 3.
+[profile.release.package.naga]
+opt-level = "s"
+[profile.release.package.wgpu-core]
+opt-level = "s"
+[profile.release.package.wgpu-hal]
+opt-level = "s"
+[profile.release.package.encoding_rs]
+opt-level = "s"
+[profile.release.package.image]
+opt-level = "s"
+[profile.release.package.tiff]
+opt-level = "s"
+[profile.release.package.zune-jpeg]
+opt-level = "s"
+[profile.release.package.regex-automata]
+opt-level = "s"
+[profile.release.package.regex-syntax]
+opt-level = "s"
+[profile.release.package.serde_json]
+opt-level = "s"
+[profile.release.package.chrono]
+opt-level = "s"
+[profile.release.package.quick-xml]
+opt-level = "s"
+[profile.release.package.reqwest]
+opt-level = "s"
+[profile.release.package.hyper]
+opt-level = "s"
+[profile.release.package.hyper-util]
+opt-level = "s"
+[profile.release.package.accesskit_consumer]
+opt-level = "s"
+[profile.release.package.accesskit_macos]
+opt-level = "s"
+[profile.release.package.rfd]
+opt-level = "s"
+[profile.release.package.winit]
+opt-level = "s"
+
 # librqbit 9.1.0 with recheck, reannounce, file order and per-torrent speed limits added.
 # Each change is offered upstream on its own; this branch of the fork joins them.
 # https://github.com/manojknaikade/rqbit/tree/rusttorrent

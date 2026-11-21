@@ -12,6 +12,7 @@ pub mod feeds;
 pub mod format;
 pub mod intake;
 pub mod limits;
+mod logfile;
 pub mod make;
 pub mod manage;
 pub mod model;
@@ -114,5 +115,19 @@ impl Drop for Core {
         if self.thread.is_some() {
             self.shutdown();
         }
+    }
+}
+
+/// macOS malloc keeps freed pages and counts them against the app. This hands them
+/// back to the system; it takes well under a millisecond.
+pub fn give_back_memory() {
+    #[cfg(target_os = "macos")]
+    {
+        unsafe extern "C" {
+            // libSystem.
+            fn malloc_zone_pressure_relief(zone: *mut std::ffi::c_void, goal: usize) -> usize;
+        }
+        // A null zone means every zone; a goal of 0 means as much as possible.
+        unsafe { malloc_zone_pressure_relief(std::ptr::null_mut(), 0) };
     }
 }

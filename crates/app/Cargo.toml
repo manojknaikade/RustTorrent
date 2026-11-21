@@ -12,7 +12,6 @@ rusttorrent-core = { path = "../core" }
 # portable check builds.
 eframe = { version = "0.37", default-features = false, features = [
     "accesskit",
-    "clipboard",
     "default_fonts",
     "links",
     "system_fonts",
@@ -24,6 +23,11 @@ eframe = { version = "0.37", default-features = false, features = [
 egui_extras = { version = "0.37", default-features = false }
 rfd = "0.18"
 png = { version = "0.18", optional = true }
+
+# On macOS the app talks to the pasteboard itself (text only, see mac.rs). The
+# clipboard crate also handles images, which brought in image decoders.
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+eframe = { version = "0.37", default-features = false, features = ["clipboard"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"

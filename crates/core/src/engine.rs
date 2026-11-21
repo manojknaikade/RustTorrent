@@ -9,7 +9,6 @@
 //! connected: the worker stops it when the interface goes away and starts a new one when
 //! it is back. While there is no session nothing is sent or received.
 use std::collections::{HashMap, HashSet};
-use std::io::Write;
 use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -253,10 +252,13 @@ struct Worker {
     last_try: Option<Instant>,
     interfaces: Vec<Interface>,
     store: Store,
-    log_path: PathBuf,
+    log: crate::logfile::LogFile,
     shared: Shared,
     on_change: OnChange,
-    notices: Vec<Notice>,
+    notices: Arc<Vec<Notice>>,
+    /// What the last snapshot showed, kept so an unchanged one is shared, not copied.
+    shown_settings: Arc<crate::store::Settings>,
+    shown_feeds: Arc<Vec<FeedView>>,
     pending: Vec<Pending>,
     next_pending: u64,
     add_tx: UnboundedSender<AddDone>,
@@ -359,11 +361,13 @@ async fn main_loop(
         last_try: None,
         interfaces: Vec::new(),
         store,
-        log_path: data_dir.join("rusttorrent.log"),
+        log: crate::logfile::LogFile::new(data_dir.join("rusttorrent.log")),
         data_dir,
         shared,
         on_change,
-        notices: Vec::new(),
+        notices: Arc::default(),
+        shown_settings: Arc::default(),
+        shown_feeds: Arc::default(),
         pending: Vec::new(),
         next_pending: 0,
         add_tx,
@@ -454,23 +458,17 @@ impl Worker {
             text: text.into(),
             error,
         };
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.log_path)
-        {
-            let _ = writeln!(
-                f,
-                "{} {} {}",
-                notice.at,
-                if error { "ERROR" } else { "info" },
-                notice.text
-            );
-        }
-        self.notices.push(notice);
-        if self.notices.len() > KEEP_NOTICES {
-            let extra = self.notices.len() - KEEP_NOTICES;
-            self.notices.drain(..extra);
+        self.log.line(&format!(
+            "{} {} {}",
+            notice.at,
+            if error { "ERROR" } else { "info" },
+            notice.text
+        ));
+        let notices = Arc::make_mut(&mut self.notices);
+        notices.push(notice);
+        if notices.len() > KEEP_NOTICES {
+            let extra = notices.len() - KEEP_NOTICES;
+            notices.drain(..extra);
         }
     }
 
@@ -493,7 +491,12 @@ impl Worker {
     }
 
     fn find(&self, key: &str) -> Option<Handle> {
-        self.handles().into_iter().find(|h| h.info_hash().as_string() == key)
+        // A key is always the 40-character hash; anything shorter would be read as an id.
+        if key.len() != 40 {
+            return None;
+        }
+        let hash = TorrentIdOrHash::parse(key).ok()?;
+        self.session.as_ref()?.get(hash)
     }
 
     fn add(&mut self, text: String, category: Option<String>) {
@@ -672,6 +675,7 @@ impl Worker {
         match self.start_session(wanted.clone()).await {
             Ok(()) => {
                 self.last_try = None;
+                give_back_memory_soon();
                 match (&wanted, self.blocked.take()) {
                     (Some(name), _) => self.notice(format!("All traffic goes through {name}."), false),
                     (None, Some(_)) => self.notice("The torrent engine is running again.", false),
@@ -931,6 +935,7 @@ impl Worker {
                     }
                 }
                 self.save();
+                give_back_memory_soon();
             }
             Command::SetFiles { key, files } => {
                 let Some(session) = self.session.clone() else {
@@ -1634,7 +1639,8 @@ impl Worker {
                 self.sync_extras(&key, &handle);
                 let record = &self.store.data.torrents[&key];
                 torrents.push(TorrentView {
-                    name: handle.name().unwrap_or_else(|| key.clone()),
+                    // The first pass above copied the name into the record once it was known.
+                    name: if record.name.is_empty() { key.clone() } else { record.name.clone() },
                     state,
                     error: stats.error.clone(),
                     total: stats.total_bytes,
@@ -1730,7 +1736,10 @@ impl Worker {
         }
 
         let (making, details) = self.make_tick().await;
-        self.comfort.speeds.push(now_secs(), down_total, up_total);
+        if self.comfort.speeds.changes(down_total, up_total) {
+            Arc::make_mut(&mut self.comfort.speeds).push(now_secs(), down_total, up_total);
+        }
+        self.share_settings_and_feeds();
         let quit_now = (self.comfort).should_quit(self.store.data.settings.comfort.when_all_done, &torrents);
         let snapshot = Snapshot {
             ready: true,
@@ -1738,22 +1747,9 @@ impl Worker {
             torrents,
             down_bps: down_total,
             up_bps: up_total,
-            settings: self.store.data.settings.clone(),
+            settings: self.shown_settings.clone(),
             schedule_off,
-            feeds: self
-                .store
-                .data
-                .feeds
-                .iter()
-                .map(|feed| {
-                    let state = self.store.data.feed_state.get(&feed.url);
-                    FeedView {
-                        feed: feed.clone(),
-                        checked_at: state.map_or(0, |s| s.checked_at),
-                        error: state.and_then(|s| s.error.clone()),
-                    }
-                })
-                .collect(),
+            feeds: self.shown_feeds.clone(),
             notices: self.notices.clone(),
             blocked: blocked.then(|| self.blocked.clone().unwrap_or_default()),
             interfaces: self.interfaces.clone(),
@@ -1764,7 +1760,7 @@ impl Worker {
             network: self.net_used.as_ref().map(|(_, s)| s.clone()).unwrap_or_default(),
             making,
             details,
-            speeds: Arc::new(self.comfort.speeds.clone()),
+            speeds: self.comfort.speeds.clone(),
             all_time: crate::comfort::AllTime {
                 running_secs: self.comfort.running().0,
                 ..self.store.data.all_time
@@ -1786,6 +1782,35 @@ impl Worker {
 }
 
 impl Worker {
+    /// Replaces the settings and feeds the snapshot shows only when they changed, so an
+    /// unchanged snapshot shares them instead of copying them every second.
+    fn share_settings_and_feeds(&mut self) {
+        let data = &self.store.data;
+        if *self.shown_settings != data.settings {
+            self.shown_settings = Arc::new(data.settings.clone());
+        }
+        let view = |feed: &crate::feeds::Feed| {
+            let state = data.feed_state.get(&feed.url);
+            (state.map_or(0, |s| s.checked_at), state.and_then(|s| s.error.as_ref()))
+        };
+        let same = self.shown_feeds.len() == data.feeds.len()
+            && self.shown_feeds.iter().zip(&data.feeds).all(|(shown, feed)| {
+                let (checked_at, error) = view(feed);
+                shown.feed == *feed && shown.checked_at == checked_at && shown.error.as_ref() == error
+            });
+        if !same {
+            let feeds = data.feeds.iter().map(|feed| {
+                let (checked_at, error) = view(feed);
+                FeedView {
+                    feed: feed.clone(),
+                    checked_at,
+                    error: error.cloned(),
+                }
+            });
+            self.shown_feeds = Arc::new(feeds.collect());
+        }
+    }
+
     /// Counts seeding time and notes which torrents are slow.
     fn watch_limits(&mut self, key: &str, stats: &librqbit::TorrentStats, live: bool, secs: u64, before: u64) {
         let limits = self.store.data.settings.limits;
@@ -1866,15 +1891,32 @@ fn http_client(bind: Option<&str>, proxy: Option<&str>) -> Option<reqwest::Clien
     builder.build().ok()
 }
 
+/// A few seconds after a torrent goes or the engine restarts, when its memory is freed.
+fn give_back_memory_soon() {
+    tokio::spawn(async {
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let _ = tokio::task::spawn_blocking(crate::give_back_memory).await;
+    });
+}
+
 async fn fetch_feed(http: &reqwest::Client, url: &str) -> Result<String, String> {
     let plain = |e: reqwest::Error| format!("{:#}", anyhow::Error::from(e.without_url()));
     let response = http.get(url).send().await.map_err(plain)?;
     if !response.status().is_success() {
         return Err(format!("the server answered {}", response.status()));
     }
-    let bytes = response.bytes().await.map_err(plain)?;
-    if bytes.len() > FEED_MAX_BYTES {
-        return Err("it is too large to be a feed".into());
+    // Stop at the cap while reading, so a huge answer is never held whole.
+    let too_large = || Err("it is too large to be a feed".to_string());
+    if response.content_length().is_some_and(|n| n > FEED_MAX_BYTES as u64) {
+        return too_large();
+    }
+    let mut response = response;
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(plain)? {
+        if bytes.len() + chunk.len() > FEED_MAX_BYTES {
+            return too_large();
+        }
+        bytes.extend_from_slice(&chunk);
     }
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }

@@ -260,6 +260,52 @@ pub struct App {
     limits: Option<limits::LimitsDialog>,
     create: Option<crate::make::CreateDialog>,
     extras: crate::comfort::Extras,
+    /// Sidebar counts, worked out in `rebuild()` instead of every frame.
+    side: Side,
+}
+
+/// What the sidebar shows next to each status, category and tag.
+#[derive(Default)]
+struct Side {
+    status: [usize; Filter::ALL.len()],
+    categories: Vec<(String, usize)>,
+    /// Only tags that some torrent has.
+    tags: Vec<(String, usize)>,
+}
+
+impl Side {
+    fn of(snap: &Snapshot) -> Self {
+        let (categories, tags) = names_in_use(snap);
+        let mut status = [0; Filter::ALL.len()];
+        for (n, f) in status.iter_mut().zip(Filter::ALL) {
+            *n = snap.torrents.iter().filter(|t| f.matches(t.state)).count();
+        }
+        let count = |name: &String, tag: bool| {
+            snap.torrents
+                .iter()
+                .filter(|t| if tag { t.tags.contains(name) } else { t.category.as_ref() == Some(name) })
+                .count()
+        };
+        Self {
+            status,
+            categories: categories
+                .into_iter()
+                .map(|n| {
+                    let c = count(&n, false);
+                    (n, c)
+                })
+                .collect(),
+            // A category stays until it is deleted; a tag goes when no torrent has it.
+            tags: tags
+                .into_iter()
+                .map(|n| {
+                    let c = count(&n, true);
+                    (n, c)
+                })
+                .filter(|(_, c)| *c > 0)
+                .collect(),
+        }
+    }
 }
 
 fn ratio_of(t: &TorrentView) -> f64 {
@@ -335,6 +381,7 @@ impl App {
             limits: None,
             create: None,
             extras: Default::default(),
+            side: Side::default(),
         }
     }
 
@@ -358,6 +405,7 @@ impl App {
     }
 
     fn rebuild(&mut self) {
+        self.side = Side::of(&self.snap);
         let all = &self.snap.torrents;
         let q = self.search.to_lowercase();
         // A category that was deleted, or a tag that no torrent has any more, cannot be
@@ -365,7 +413,7 @@ impl App {
         if self
             .category
             .as_ref()
-            .is_some_and(|c| !names_in_use(&self.snap).0.contains(c))
+            .is_some_and(|c| !self.side.categories.iter().any(|(n, _)| n == c))
         {
             self.category = None;
         }
@@ -386,11 +434,17 @@ impl App {
             })
             .collect();
         let (col, asc) = self.sort;
-        self.view.sort_by(|&a, &b| {
-            let (a, b) = (&all[a], &all[b]);
+        // Lower-case each name once, not twice per comparison.
+        let lower: Vec<String> = if col == 2 {
+            all.iter().map(|t| t.name.to_lowercase()).collect()
+        } else {
+            Vec::new()
+        };
+        self.view.sort_by(|&ia, &ib| {
+            let (a, b) = (&all[ia], &all[ib]);
             let order = match col {
                 1 => a.queue_pos.unwrap_or(u32::MAX).cmp(&b.queue_pos.unwrap_or(u32::MAX)),
-                2 => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+                2 => lower[ia].cmp(&lower[ib]),
                 3 => a.progress().total_cmp(&b.progress()),
                 4 => a.total.cmp(&b.total),
                 5 => a.down_bps.cmp(&b.down_bps),
@@ -514,8 +568,7 @@ impl App {
     fn sidebar(&mut self, ui: &mut egui::Ui) {
         ui.add_space(8.0);
         ui.label(RichText::new("STATUS").small().weak());
-        for f in Filter::ALL {
-            let count = self.snap.torrents.iter().filter(|t| f.matches(t.state)).count();
+        for (f, count) in Filter::ALL.into_iter().zip(self.side.status) {
             let text = format!("{}  {count}", f.label());
             let on = self.filter == f;
             let text = match f.dot() {
@@ -530,27 +583,11 @@ impl App {
             }
         }
         let snap = self.snap.clone();
-        let (categories, tags) = names_in_use(&snap);
+        let (categories, tags) = (self.side.categories.clone(), self.side.tags.clone());
         let (mut new_category, mut remove) = (false, None::<String>);
         let mut set_dir: Option<(String, Option<std::path::PathBuf>)> = None;
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
             for (title, names, tag) in [("CATEGORIES", categories, false), ("TAGS", tags, true)] {
-                let names: Vec<(String, usize)> = names
-                    .into_iter()
-                    .map(|n| {
-                        let has = |t: &&TorrentView| {
-                            if tag {
-                                t.tags.contains(&n)
-                            } else {
-                                t.category.as_ref() == Some(&n)
-                            }
-                        };
-                        let count = snap.torrents.iter().filter(has).count();
-                        (n, count)
-                    })
-                    // A category stays until it is deleted; a tag goes when no torrent has it.
-                    .filter(|(_, count)| !tag || *count > 0)
-                    .collect();
                 if tag && names.is_empty() {
                     continue;
                 }
@@ -2194,8 +2231,8 @@ fn trackers(ui: &mut egui::Ui, t: &TorrentView) {
     });
 }
 
-impl eframe::App for App {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+impl App {
+    fn draw(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
 
         let snap = self.core.snapshot();
@@ -2365,6 +2402,19 @@ impl eframe::App for App {
         if self.dirty {
             ctx.request_repaint();
         }
+    }
+}
+
+impl eframe::App for App {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.draw(ui);
+        #[cfg(target_os = "macos")]
+        crate::mac::copy_out(ui.ctx());
+    }
+
+    #[cfg(target_os = "macos")]
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        crate::mac::clipboard_keys(&mut raw_input.events);
     }
 
     fn on_exit(&mut self) {

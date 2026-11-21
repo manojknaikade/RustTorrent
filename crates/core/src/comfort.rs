@@ -83,6 +83,11 @@ pub struct SpeedHistory {
 }
 
 impl SpeedHistory {
+    /// Whether these speeds differ from the last ones kept, so `push` would change anything.
+    pub fn changes(&self, down: u64, up: u64) -> bool {
+        self.samples.back().is_none_or(|&(_, d, u)| d != down || u != up)
+    }
+
     pub fn push(&mut self, at: u64, down: u64, up: u64) {
         match self.samples.back_mut() {
             Some(&mut (_, d, u)) if d == down && u == up => return,
@@ -263,7 +268,8 @@ pub fn nothing_left(torrents: &[TorrentView]) -> bool {
 
 /// What the engine worker keeps for this module.
 pub(crate) struct Tracker {
-    pub speeds: SpeedHistory,
+    /// Shared with the snapshot; changed in place only when the speed changes.
+    pub speeds: Arc<SpeedHistory>,
     /// Downloaded counter last seen per running torrent, to add only the difference.
     last_down: HashMap<String, u64>,
     /// Torrents seen downloading while the app runs; only these can "finish".
@@ -281,7 +287,7 @@ pub(crate) struct Tracker {
 impl Tracker {
     pub fn new(all_time: &AllTime) -> Self {
         Self {
-            speeds: SpeedHistory::default(),
+            speeds: Arc::default(),
             last_down: HashMap::new(),
             downloading: HashSet::new(),
             finished: Vec::new(),
@@ -373,6 +379,16 @@ mod tests {
         assert_eq!(h, before, "an unchanged speed must not change the history");
         h.push(103, 9, 2);
         assert_eq!(h.series(104, 6), vec![(0, 0), (5, 1), (5, 1), (5, 1), (9, 2), (9, 2)]);
+    }
+
+    #[test]
+    fn history_says_when_a_speed_would_change_it() {
+        let mut h = SpeedHistory::default();
+        assert!(h.changes(0, 0), "an empty history takes the first speed");
+        h.push(10, 5, 1);
+        assert!(!h.changes(5, 1));
+        assert!(h.changes(6, 1));
+        assert!(h.changes(5, 2));
     }
 
     #[test]

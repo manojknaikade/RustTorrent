@@ -146,12 +146,13 @@ pub struct Snapshot {
     pub torrents: Vec<TorrentView>,
     pub down_bps: u64,
     pub up_bps: u64,
-    pub settings: Settings,
+    /// Shared with the engine and replaced only when the settings change.
+    pub settings: Arc<Settings>,
     /// The schedule is stopping all transfers right now.
     pub schedule_off: bool,
-    pub feeds: Vec<FeedView>,
+    pub feeds: Arc<Vec<FeedView>>,
     /// Recent messages, oldest first.
-    pub notices: Vec<Notice>,
+    pub notices: Arc<Vec<Notice>>,
     /// Set while the engine is stopped and nothing is sent or received: says why.
     pub blocked: Option<String>,
     /// The network interfaces that are connected right now.

@@ -71,6 +71,9 @@ fn main() -> eframe::Result {
             surface: eframe::egui_wgpu::SurfaceConfig::LOW_LATENCY,
             ..Default::default()
         },
+        // On macOS Cmd+C/X/V reach the app as keys and mac.rs turns them into
+        // copy, cut and paste with the system pasteboard.
+        clipboard_shortcuts: !cfg!(target_os = "macos"),
         ..Default::default()
     };
     eframe::run_native(

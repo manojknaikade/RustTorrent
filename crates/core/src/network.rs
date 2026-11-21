@@ -8,7 +8,7 @@ use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
-use librqbit::{ConnectionOptions, ListenerOptions};
+use librqbit::{ConnectionOptions, ListenerMode, ListenerOptions};
 use serde::{Deserialize, Serialize};
 
 use crate::blocklist;
@@ -24,6 +24,10 @@ pub struct NetworkSettings {
     pub dht: bool,
     /// Find peers on the same local network.
     pub local_discovery: bool,
+    /// Also connect to peers over uTP (on UDP), next to TCP. Off by default: the engine
+    /// marks it as not yet stable. Never used while the proxy is on, as SOCKS5 here
+    /// carries TCP only.
+    pub utp: bool,
     pub proxy: ProxySettings,
     /// A block list file the user chose. Read each time the engine starts.
     pub blocklist: Option<PathBuf>,
@@ -38,6 +42,7 @@ impl Default for NetworkSettings {
             upnp: true,
             dht: true,
             local_discovery: true,
+            utp: false,
             proxy: ProxySettings::default(),
             blocklist: None,
             banned: Vec::new(),
@@ -199,6 +204,11 @@ pub(crate) async fn prepare(
         anyhow::bail!("{BOTH}");
     }
     let listen = ListenerOptions {
+        mode: if settings.utp && !settings.proxy.enabled {
+            ListenerMode::TcpAndUtp
+        } else {
+            ListenerMode::TcpOnly
+        },
         listen_addr: (Ipv6Addr::UNSPECIFIED, settings.port).into(),
         enable_upnp_port_forwarding: settings.upnp,
         ..Default::default()
@@ -436,6 +446,22 @@ mod tests {
         let dir = std::env::temp_dir();
         let e = prepare(&s, Some("utun9"), &dir).await.err().unwrap();
         assert_eq!(e.to_string(), BOTH);
+    }
+
+    #[tokio::test]
+    async fn utp_is_used_only_when_on_and_there_is_no_proxy() {
+        let dir = std::env::temp_dir();
+        let utp = |s: NetworkSettings| {
+            let dir = dir.clone();
+            async move { prepare(&s, None, &dir).await.unwrap().listen.mode.utp_enabled() }
+        };
+        assert!(!utp(NetworkSettings::default()).await);
+        let on = NetworkSettings {
+            utp: true,
+            ..Default::default()
+        };
+        assert!(utp(on.clone()).await);
+        assert!(!utp(NetworkSettings { proxy: proxy(), ..on }).await);
     }
 
     /// A tiny SOCKS5 server that answers one connection: it records the login and the

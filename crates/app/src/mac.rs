@@ -7,6 +7,7 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, Imp, Sel};
 use objc2::{class, define_class, msg_send, sel, AllocAnyThread};
 use objc2_foundation::{NSArray, NSNotification, NSObject, NSString, NSURL};
+use eframe::egui;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 extern "C-unwind" fn open_urls(_this: &AnyObject, _sel: Sel, _app: &AnyObject, urls: &NSArray<NSURL>) {
@@ -103,19 +104,17 @@ pub fn install() {
     give_back_memory();
 }
 
-unsafe extern "C" {
-    // libSystem. Hands pages that malloc holds but no longer uses back to the system.
-    fn malloc_zone_pressure_relief(zone: *mut std::ffi::c_void, goal: usize) -> usize;
-}
-
 /// macOS malloc keeps freed pages and counts them against the app, so after a busy
 /// moment (startup, a burst of peers) an idle app could hold 10 MB or more it no longer
-/// uses. Once a minute the pages go back; the call takes well under a millisecond.
+/// uses. The pages go back 5 s after start, then once a minute. The engine also hands
+/// them back after torrents are removed and after it restarts.
 fn give_back_memory() {
-    let spawned = std::thread::Builder::new().name("memory".into()).spawn(|| loop {
-        std::thread::sleep(std::time::Duration::from_secs(60));
-        // A null zone means every zone; a goal of 0 means as much as possible.
-        unsafe { malloc_zone_pressure_relief(std::ptr::null_mut(), 0) };
+    let spawned = std::thread::Builder::new().name("memory".into()).spawn(|| {
+        std::thread::sleep(std::time::Duration::from_secs(5));
+        loop {
+            rusttorrent_core::give_back_memory();
+            std::thread::sleep(std::time::Duration::from_secs(60));
+        }
     });
     drop(spawned);
 }
@@ -145,4 +144,99 @@ pub fn make_magnet_handler() -> bool {
     let scheme = NSString::from_str("magnet");
     let id = NSString::from_str(BUNDLE_ID);
     unsafe { LSSetDefaultHandlerForURLScheme(&*scheme, &*id) == 0 }
+}
+
+/// The system pasteboard, text only. egui's own clipboard support also handles images,
+/// which brought image decoders into the app.
+mod pasteboard {
+    use objc2::rc::Retained;
+    use objc2::runtime::{AnyObject, Bool};
+    use objc2::{class, msg_send};
+    use objc2_foundation::NSString;
+
+    const TEXT: &str = "public.utf8-plain-text";
+
+    fn general() -> Option<Retained<AnyObject>> {
+        unsafe { msg_send![class!(NSPasteboard), generalPasteboard] }
+    }
+
+    pub fn text() -> Option<String> {
+        let board = general()?;
+        let kind = NSString::from_str(TEXT);
+        let text: Option<Retained<NSString>> = unsafe { msg_send![&*board, stringForType: &*kind] };
+        text.map(|t| t.to_string())
+    }
+
+    pub fn set_text(text: &str) {
+        let Some(board) = general() else { return };
+        let kind = NSString::from_str(TEXT);
+        let text = NSString::from_str(text);
+        unsafe {
+            let _: isize = msg_send![&*board, clearContents];
+            let _: Bool = msg_send![&*board, setString: &*text, forType: &*kind];
+        }
+    }
+}
+
+/// Turns Cmd+C, Cmd+X and Cmd+V (and the dedicated keys) into copy, cut and paste.
+/// They arrive as plain keys because the window's own clipboard shortcuts are off.
+pub fn clipboard_keys(events: &mut Vec<egui::Event>) {
+    use egui::{Event, Key};
+    let mut out = Vec::with_capacity(events.len());
+    for event in events.drain(..) {
+        if let Event::Key { key, pressed: true, modifiers, .. } = &event {
+            let cmd = modifiers.command_only();
+            match key {
+                Key::C if cmd => {
+                    out.push(Event::Copy);
+                    continue;
+                }
+                Key::Copy => {
+                    out.push(Event::Copy);
+                    continue;
+                }
+                Key::X if cmd => {
+                    out.push(Event::Cut);
+                    continue;
+                }
+                Key::Cut => {
+                    out.push(Event::Cut);
+                    continue;
+                }
+                Key::V if cmd => {
+                    paste(&mut out);
+                    continue;
+                }
+                Key::Paste => {
+                    paste(&mut out);
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        out.push(event);
+    }
+    *events = out;
+}
+
+fn paste(out: &mut Vec<egui::Event>) {
+    if let Some(text) = pasteboard::text().filter(|t| !t.is_empty()) {
+        out.push(egui::Event::Paste(text.replace("\r\n", "\n")));
+    }
+}
+
+/// Puts text the window copied this frame on the system pasteboard.
+pub fn copy_out(ctx: &egui::Context) {
+    let copied: Vec<String> = ctx.output(|o| {
+        o.commands
+            .iter()
+            .filter_map(|c| match c {
+                egui::OutputCommand::CopyText(text) => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    });
+    if let Some(text) = copied.last() {
+        pasteboard::set_text(text);
+    }
 }

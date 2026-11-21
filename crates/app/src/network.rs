@@ -14,6 +14,7 @@ pub struct Form {
     upnp: bool,
     dht: bool,
     local_discovery: bool,
+    utp: bool,
     proxy: ProxySettings,
     blocklist: Option<PathBuf>,
     banned: Vec<String>,
@@ -29,6 +30,7 @@ impl Form {
             upnp: s.upnp,
             dht: s.dht,
             local_discovery: s.local_discovery,
+            utp: s.utp,
             proxy: s.proxy.clone(),
             blocklist: s.blocklist.clone(),
             banned: s.banned.clone(),
@@ -46,6 +48,7 @@ impl Form {
             upnp: self.upnp,
             dht: self.dht,
             local_discovery: self.local_discovery,
+            utp: self.utp,
             proxy: self.proxy.clone(),
             blocklist: self.blocklist.clone(),
             banned: self.banned.clone(),
@@ -118,6 +121,8 @@ fn summary(form: &Form, snap: &Snapshot) -> String {
     }];
     if form.proxy.enabled {
         parts.push("proxy on".into());
+    } else if form.utp {
+        parts.push("uTP on".into());
     }
     if form.blocklist.is_some() {
         parts.push("block list on".into());
@@ -183,6 +188,19 @@ fn body(ui: &mut egui::Ui, form: &mut Form, snap: &Snapshot) {
         note(
             ui,
             "Off: computers on your network sharing the same torrent are not found.",
+        );
+    }
+    ui.add_enabled(
+        !form.proxy.enabled,
+        egui::Checkbox::new(&mut form.utp, "Also connect over uTP (UDP)"),
+    );
+    if form.proxy.enabled {
+        note(ui, "Not used while the proxy is on: the proxy carries TCP only.");
+    } else if form.utp {
+        note(
+            ui,
+            "uTP can reach peers that TCP cannot, and yields to other traffic on a busy line. \
+             The torrent engine marks it as new, so turn it off if transfers get worse.",
         );
     }
     note(
