@@ -33,6 +33,47 @@ pub enum WhenAllDone {
     #[default]
     Nothing,
     Quit,
+    /// Put the computer to sleep.
+    Sleep,
+    /// Shut the computer down. Other apps can still refuse, as with the system's own command.
+    ShutDown,
+}
+
+/// The program that puts the computer to sleep or shuts it down, with its arguments.
+/// `None` for the choices that are not about power, or on a system without one.
+pub fn power_command(when: WhenAllDone) -> Option<Vec<&'static str>> {
+    let words: &[&str] = match when {
+        WhenAllDone::Nothing | WhenAllDone::Quit => return None,
+        // `pmset` needs no administrator rights for sleep. The shut-down goes through
+        // System Events so other apps are asked to quit and can save their work.
+        WhenAllDone::Sleep if cfg!(target_os = "macos") => &["pmset", "sleepnow"],
+        WhenAllDone::ShutDown if cfg!(target_os = "macos") => {
+            &["osascript", "-e", "tell application \"System Events\" to shut down"]
+        }
+        WhenAllDone::Sleep if cfg!(target_os = "windows") => &["rundll32.exe", "powrprof.dll,SetSuspendState", "0,1,0"],
+        WhenAllDone::ShutDown if cfg!(target_os = "windows") => &["shutdown", "/s", "/t", "0"],
+        WhenAllDone::Sleep => &["systemctl", "suspend"],
+        WhenAllDone::ShutDown => &["systemctl", "poweroff"],
+    };
+    Some(words.to_vec())
+}
+
+/// Puts the computer to sleep or shuts it down. Does not wait for the command.
+pub fn power(when: WhenAllDone) -> Result<(), String> {
+    let Some(words) = power_command(when) else {
+        return Ok(());
+    };
+    let mut child = std::process::Command::new(words[0])
+        .args(&words[1..])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("Could not run {}: {e}", words[0]))?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -276,8 +317,10 @@ pub(crate) struct Tracker {
     downloading: HashSet<String>,
     pub finished: Vec<Finished>,
     next_id: u64,
-    /// A download finished since "quit when all downloads finish" was last turned on.
+    /// A download finished since "when all downloads finish" was last changed or acted on.
     armed: bool,
+    /// How many times everything has finished; the front end acts when this goes up.
+    pub all_done: u64,
     started: Instant,
     started_at: u64,
     /// Running time saved before this run.
@@ -293,6 +336,7 @@ impl Tracker {
             finished: Vec::new(),
             next_id: 1,
             armed: false,
+            all_done: 0,
             started: Instant::now(),
             started_at: crate::now_secs(),
             base_secs: all_time.running_secs,
@@ -354,15 +398,20 @@ impl Tracker {
         }
     }
 
-    /// Called when the user turns "quit when all downloads finish" on: only downloads
-    /// that finish after that count.
+    /// Called when the user changes what happens when all downloads finish: only
+    /// downloads that finish after that count.
     pub fn disarm(&mut self) {
         self.armed = false;
     }
 
-    /// The app should quit now.
-    pub fn should_quit(&self, when: WhenAllDone, torrents: &[TorrentView]) -> bool {
-        when == WhenAllDone::Quit && self.armed && nothing_left(torrents)
+    /// Counts up [`Tracker::all_done`] when a download has finished, nothing is left and
+    /// something should happen. It then waits for the next finish, so the computer is not
+    /// put to sleep again the moment it wakes.
+    pub fn check_all_done(&mut self, when: WhenAllDone, torrents: &[TorrentView]) {
+        if when != WhenAllDone::Nothing && self.armed && nothing_left(torrents) {
+            self.all_done += 1;
+            self.armed = false;
+        }
     }
 }
 
@@ -456,52 +505,44 @@ mod tests {
     }
 
     fn view(state: State, done: u64, total: u64) -> TorrentView {
-        TorrentView {
-            key: "k".into(),
-            name: "n".into(),
-            state,
-            error: None,
-            total,
-            done,
-            uploaded: 0,
-            down_bps: 0,
-            up_bps: 0,
-            peers_live: 0,
-            peers_seen: 0,
-            category: None,
-            tags: Vec::new(),
-            save_path: String::new(),
-            added_at: 0,
-            held: None,
-            queue_pos: None,
-            ratio_limit_pct: None,
-            files: Arc::default(),
-            file_done: Vec::new(),
-            selected: None,
-            trackers: Arc::default(),
-            peers: Vec::new(),
-            force_start: false,
-            limits: Default::default(),
-            down_limit_kib: 0,
-            up_limit_kib: 0,
-            priorities: Default::default(),
-        }
+        TorrentView::sample("k", state, done, total)
     }
 
     #[test]
-    fn quit_only_when_armed_and_nothing_left() {
+    fn all_done_only_when_armed_and_nothing_left() {
         let mut t = Tracker::new(&AllTime::default());
         let seeding = [view(State::Seeding, 10, 10), view(State::Paused, 1, 10)];
-        assert!(!t.should_quit(WhenAllDone::Quit, &seeding), "nothing finished yet");
+        t.check_all_done(WhenAllDone::Quit, &seeding);
+        assert_eq!(t.all_done, 0, "nothing finished yet");
         t.add_finished("k".into(), "n".into(), "/".into());
-        assert!(t.should_quit(WhenAllDone::Quit, &seeding));
-        assert!(!t.should_quit(WhenAllDone::Nothing, &seeding));
+        t.check_all_done(WhenAllDone::Nothing, &seeding);
+        assert_eq!(t.all_done, 0, "nothing to do");
         let busy = [view(State::Seeding, 10, 10), view(State::Queued, 1, 10)];
-        assert!(!t.should_quit(WhenAllDone::Quit, &busy));
+        t.check_all_done(WhenAllDone::Sleep, &busy);
+        assert_eq!(t.all_done, 0);
         // A finished torrent still being moved out of the folder for unfinished downloads.
         let moving = [view(State::Seeding, 10, 10), view(State::Moving, 10, 10)];
-        assert!(!t.should_quit(WhenAllDone::Quit, &moving));
+        t.check_all_done(WhenAllDone::Sleep, &moving);
+        assert_eq!(t.all_done, 0);
+        t.check_all_done(WhenAllDone::Sleep, &seeding);
+        assert_eq!(t.all_done, 1);
+        // Once only: after waking, the computer is not put to sleep again.
+        t.check_all_done(WhenAllDone::Sleep, &seeding);
+        assert_eq!(t.all_done, 1);
+        t.add_finished("k2".into(), "n".into(), "/".into());
         t.disarm();
-        assert!(!t.should_quit(WhenAllDone::Quit, &seeding));
+        t.check_all_done(WhenAllDone::Quit, &seeding);
+        assert_eq!(t.all_done, 1, "turned on after the finish");
+    }
+
+    #[test]
+    fn power_commands() {
+        assert_eq!(power_command(WhenAllDone::Nothing), None);
+        assert_eq!(power_command(WhenAllDone::Quit), None);
+        assert!(power_command(WhenAllDone::Sleep).is_some_and(|w| w.len() >= 2));
+        if cfg!(target_os = "macos") {
+            assert_eq!(power_command(WhenAllDone::Sleep), Some(vec!["pmset", "sleepnow"]));
+            assert_eq!(power_command(WhenAllDone::ShutDown).unwrap()[0], "osascript");
+        }
     }
 }

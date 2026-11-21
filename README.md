@@ -26,7 +26,8 @@ Adding
 - Add by clicking a magnet link in a browser, opening a `.torrent` file from Finder, dropping a file on the window, or pasting into the add box.
 - Add dialog: choose the folder, category, files and "start paused" before the download begins. It appears when "ask where to save" is on in Settings.
 - Folder buttons open a menu of the last 8 folders used, with "Other folder…" to pick a new one.
-- Watch folder: `.torrent` files put in a chosen folder are added by themselves. A file that has been added is renamed to end in `.added`.
+- Watch folders: `.torrent` files put in a chosen folder are added by themselves. There can be several folders, and each can give its torrents a category. A file that has been added is renamed to end in `.added`.
+- Import from Transmission or qBittorrent (Settings): their torrents are added with the folder each one saved to, its category and whether it was paused. The data stays where it is and is checked before the download goes on.
 - RSS and Atom feeds, read every 15 minutes. A feed's rule can use word lists or a regular expression, an episode filter ("S02E05 and later"), skip repeats of an episode, and take only items newer than the ones already listed. A preview shows a feed's items with a Download button for each. A feed can give its torrents a category.
 
 Managing
@@ -34,11 +35,14 @@ Managing
 - Pause, resume, force start (ignore the queue) and remove (optionally deleting the downloaded files).
 - Choose which files of a torrent to download, and give each file a priority: high, normal or low.
 - Recheck a torrent's data, reannounce it to its trackers, or move its data to another folder (right-click menu). A move takes the torrent out of the engine, moves the files, then adds it back at the new folder, where its data is checked again. A move cut short by quitting finishes on the next start.
-- A folder for unfinished downloads (Settings): torrents download there and are moved to their own folder when they finish. The finish notice and the finish program wait until the move is done. A torrent whose data is already in its own folder starts there.
+- A torrent with more than one file gets a folder named after it inside the download folder. A torrent with one file is saved straight into the download folder. Torrents added by older versions keep the folder they had; moving one's data puts it in a folder of its own name.
+- A folder for unfinished downloads (Settings): torrents download there and are moved to the download folder when they finish. The finish notice and the finish program wait until the move is done. A torrent whose data is already in the download folder starts there.
 - Categories and tags, with filters in the sidebar. Make a category with + in the sidebar or by typing a name in the add dialog; right-click one in the sidebar to set its folder or delete it. A category can have its own download folder: a torrent put in that category is saved there, and its data is moved there if it was already downloading.
 - Copy a torrent's magnet link, info-hash or name. Save its `.torrent` file.
 - Make a `.torrent` from a file or folder: trackers in tiers, piece size, comment, private flag, and start seeding it straight away.
 - Downloads go in order: high-priority files first, then normal, then low, by name within each, each file from its start to its end (the first and last piece of a file come first, so a player can read its index). This is how the engine works, so it cannot be switched off.
+- Play a file of a torrent, or copy a link to it, from the Files tab, even before it has finished: the parts being played are downloaded first. The link is served by the app on this computer only. Play opens VLC if it is installed, otherwise the default app for web links.
+- Disk guard: downloads are paused when their disk has less than a chosen amount free (1 GB by default; Settings), with a notice saying so.
 - Torrents carry on after the app is restarted. The app warns before quitting while downloads are running.
 
 Limits
@@ -63,12 +67,13 @@ The window
 - Sortable table with a column chooser, search, and filters by status, category and tag.
 - Speed graph in the toolbar, a Statistics window with all-time totals, and a Log window.
 - Dark and light themes.
-- When a download finishes: a notification, and optionally a program is run (`%N` is the torrent's name, `%F` its folder). When all downloads finish, the app can quit.
+- When a download finishes: a notification, and optionally a program is run (`%N` is the torrent's name, `%F` its folder). When all downloads finish, the app can quit, or put the computer to sleep or shut it down after a 30-second countdown that can be cancelled.
 - Keeps the Mac awake while transferring, if switched on.
 
 Remote control
 
-- A small web page, served by the app itself, for a browser or phone. It is off until you turn it on in Settings and set a password. See [Remote control](#remote-control).
+- A small web page, served by the app itself, for a browser or phone. It can also switch slow mode and set the seeding and queue limits. It is off until you turn it on in Settings and set a password. See [Remote control](#remote-control).
+- A part of qBittorrent's Web API on the same port and password, so Sonarr, Radarr and phone apps made for qBittorrent can use RustTorrent. Point them at the same address; any user name works.
 
 ## Size and speed
 
@@ -129,7 +134,8 @@ What protects it:
 - It is off by default, and without "Allow other devices" it answers only on the computer itself.
 - Nothing is shown or done without signing in. The password is kept only as a salted, slow hash (PBKDF2, 600,000 rounds). Sign-in is limited to one try a second, with a 30-second lock after every fifth wrong password.
 - Requests are checked for where they come from, so a web page open in another tab cannot send commands, and the page cannot be reached under a made-up host name.
-- The page can do a fixed, short list of things: add a magnet link, web address or uploaded `.torrent` file (up to 4 MiB), pause, resume, remove, choose which of a torrent's files to download, set its category, set speed limits. It cannot read or choose folders on the computer, and it cannot change the app's other settings.
+- The page can do a fixed, short list of things: add a magnet link, web address or uploaded `.torrent` file (up to 4 MiB), pause, resume, remove, choose which of a torrent's files to download, set its category, set speed limits, slow mode, and the seeding and queue limits. It cannot read or choose folders on the computer, and it cannot change the app's other settings.
+- The qBittorrent API has the same limits as the page and goes through the same sign-in, host and origin checks. It cannot change folders or the app's preferences.
 - Changing the password, the port or the network choice signs everyone out.
 
 ## Layout of the code
@@ -154,15 +160,21 @@ cargo test --workspace
 - Interface binding works on the Mac and Linux. On Windows the interface list is empty.
 - Without "Use HTTPS", remote control is not encrypted: on "Allow other devices", the password and everything else travel in the clear. With HTTPS the certificate is self-made and names only `localhost` and the loopback addresses, so a phone's browser warns about it. Do not open the port to the internet either way.
 - Remote control does not follow the chosen network interface: with a VPN interface chosen it still answers on the normal network.
-- The remote page cannot see or set slow mode, the seeding limits or the queue limits. It was tested in one desktop browser, not on a real phone; uploading a valid `.torrent` file, the Files dialog and HTTPS were checked by automated tests only.
+- The remote page cannot set the slow-mode schedule or the transfer schedule. It was tested in one desktop browser, not on a real phone; uploading a valid `.torrent` file, the Files dialog and HTTPS were checked by automated tests only.
 - Switching in-order download off is missing: the engine cannot do it without a large change.
 - Recheck, reannounce, per-torrent limits and file priorities come from a patched copy of the engine (librqbit), pinned in `Cargo.toml`, until the changes are accepted upstream.
-- With a folder for unfinished downloads, a magnet or web link added without the add dialog always starts in that folder, even when its data is already in its own folder. If the app quits between a finish and the move, the finish notice and program for that torrent are skipped; the move itself still happens.
+- With a folder for unfinished downloads, if the app quits between a finish and the move, the finish notice and program for that torrent are skipped; the move itself still happens.
+- Torrents are added to the engine one at a time. Many added at once (a dropped batch, a watch folder, an import) queue for a moment. The engine gave two adds at the same moment the same number, and called the second one a duplicate.
 - While a torrent's data is being moved it cannot be removed, and its transfers stop until the move ends.
 - A torrent stopped by a seeding time limit stays stopped when resumed, until the limit is raised.
 - The proxy password is kept as plain text in the settings file. The block list is read only when the engine starts. Changing a network setting restarts the engine, which interrupts transfers for a moment.
 - The finish notification was never seen: macOS refused notification permission to the locally signed app on the test Mac. Keeping the Mac awake was not confirmed by measurement. The proxy and the block list were checked by automated tests only.
 - There is no menu-bar icon; closing the window quits the app.
+- The qBittorrent API was tested with automated tests over a real connection, not with real Sonarr, Radarr or phone apps. A folder given on add (`savepath`) is ignored, and moving a torrent (`setLocation`) and changing preferences are refused. Tags given on add are ignored. Some numbers it reports are estimates: seeds and leechers are not told apart, and finish times, tracker status and piece counts are not known. A program in Docker that reaches the app under a host name other than `localhost`, a `.local` name or an IP address is refused by the host check; use the IP address.
+- Playing was tested with a torrent made and seeded on the same computer, not while downloading from other peers, and not with VLC itself. At most 3 files play at once. A link copied while a torrent runs keeps working after it is paused, but then stalls on any part not yet downloaded.
+- The disk guard does not resume downloads when room is made again; resume them by hand. On Windows it does nothing, because free space is not read there yet.
+- Sleep and shut down were checked by automated tests only, not by letting a Mac sleep or shut down.
+- Import was tested against hand-made files only, not files written by Transmission or qBittorrent. Transmission's folder for unfinished downloads is not read. qBittorrent entries that never got their `.torrent` data (magnet links still looking for it) are skipped.
 - The "Open them in RustTorrent" button in Settings was not tested: on the test Mac, RustTorrent was already the app for magnet links.
 - Built and tested on Apple Silicon only. The Homebrew install is for Apple Silicon only.
 

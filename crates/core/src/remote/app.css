@@ -20,6 +20,7 @@ h2 { font-size: 18px; margin: 0 0 8px; }
 header { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; margin-bottom: 12px; }
 header #speeds { margin-left: auto; font-variant-numeric: tabular-nums; white-space: nowrap; }
 header button { white-space: nowrap; }
+header button[aria-pressed="true"] { border-color: var(--accent); font-weight: 600; }
 .muted { color: var(--muted); font-size: 14px; }
 .center { text-align: center; }
 .error { color: var(--danger); min-height: 1.4em; margin: 0; }

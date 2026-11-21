@@ -19,6 +19,12 @@
 //! A `.torrent` file can be sent from the page. Only a signed-in request from the page
 //! itself may send a body larger than a command, the body is read into memory only, up
 //! to [`MAX_UPLOAD`], and it is taken only if it reads as a torrent.
+//!
+//! Under `/api/v2/` the same server speaks a part of qBittorrent's Web API, for phone apps
+//! and for Sonarr and Radarr; see [`qbit`]. Those programs cannot send the page's own
+//! header, so there the session cookie (`SID`, never sent along from other sites) and the
+//! origin check have to do without it.
+mod qbit;
 pub(crate) mod tls;
 
 use std::collections::HashMap;
@@ -36,7 +42,9 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio_rustls::TlsAcceptor;
 
 use crate::intake::{self, Source};
+use crate::limits::SlowReason;
 use crate::model::Snapshot;
+use crate::store::Settings;
 use crate::{Command, Shared};
 
 /// The shortest password the app accepts.
@@ -51,6 +59,8 @@ const SESSION_LIFE: Duration = Duration::from_secs(7 * 24 * 3600);
 const MAX_SESSIONS: usize = 16;
 const MAX_KEYS: usize = 1000;
 const COOKIE: &str = "rusttorrent";
+/// The cookie qBittorrent's API uses for its session.
+const QBIT_COOKIE: &str = "SID";
 /// The largest `.torrent` file the page may send. Most are well under 1 MiB.
 pub(crate) const MAX_UPLOAD: usize = 4 * 1024 * 1024;
 /// More files than this in one choice is not a real request.
@@ -73,6 +83,11 @@ pub(crate) fn unhex(text: &str) -> Option<Vec<u8>> {
         .step_by(2)
         .map(|i| u8::from_str_radix(&text[i..i + 2], 16).ok())
         .collect()
+}
+
+/// A long random text, hard to guess, for links that must stay private.
+pub(crate) fn new_token() -> String {
+    hex(&random(32))
 }
 
 fn random(len: usize) -> Vec<u8> {
@@ -112,6 +127,13 @@ pub(crate) async fn listen(lan: bool, port: u16) -> std::io::Result<TcpListener>
 struct Guard {
     failures: u32,
     locked_until: Option<Instant>,
+}
+
+enum Check {
+    Right,
+    Wrong,
+    /// Too soon after the last try, or locked after too many wrong ones.
+    Wait,
 }
 
 struct Server {
@@ -189,6 +211,8 @@ struct Request {
     method: String,
     /// Without the part after `?`.
     path: String,
+    /// The part after `?`, still encoded.
+    query: String,
     /// Names in lower case.
     headers: Vec<(String, String)>,
     body: Vec<u8>,
@@ -199,11 +223,13 @@ impl Request {
         self.headers.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str())
     }
 
+    /// The value of the session cookie this request's path uses.
     fn cookie(&self) -> Option<&str> {
+        let wanted = if is_qbit(&self.path) { QBIT_COOKIE } else { COOKIE };
         self.header("cookie")?
             .split(';')
             .filter_map(|part| part.trim().split_once('='))
-            .find(|(name, _)| *name == COOKIE)
+            .find(|(name, _)| *name == wanted)
             .map(|(_, value)| value)
     }
 }
@@ -238,9 +264,11 @@ fn parse_head(head: &str) -> Result<(Request, usize), u16> {
     if length > MAX_UPLOAD {
         return Err(413);
     }
+    let (path, query) = target.split_once('?').unwrap_or((target, ""));
     let request = Request {
         method: method.to_owned(),
-        path: target.split('?').next().unwrap_or("/").to_owned(),
+        path: path.to_owned(),
+        query: query.to_owned(),
         headers,
         body: Vec::new(),
     };
@@ -267,10 +295,8 @@ async fn read_request<S: AsyncRead + AsyncWrite + Unpin>(server: &Server, stream
     if length > MAX_BODY {
         // Checked before a byte of it is read, so nobody else can make the app hold
         // megabytes in memory.
-        if !(request.method == "POST" && request.path == "/api/upload")
-            || server.gate(&request).is_err()
-            || !server.signed_in(&request)
-        {
+        let upload = request.path == "/api/upload" || request.path == "/api/v2/torrents/add";
+        if !(request.method == "POST" && upload) || server.gate(&request).is_err() || !server.signed_in(&request) {
             return Err(413);
         }
         if request
@@ -306,6 +332,11 @@ fn host_name(host: &str) -> &str {
     }
 }
 
+/// Paths of the qBittorrent-style API.
+fn is_qbit(path: &str) -> bool {
+    path.starts_with("/api/v2/")
+}
+
 /// True for the names this server can honestly be reached by. A domain name from the
 /// internet is never one of them.
 fn host_allowed(host: &str) -> bool {
@@ -319,6 +350,8 @@ struct Reply {
     body: Vec<u8>,
     /// A new value for the session cookie. An empty one removes the cookie.
     cookie: Option<String>,
+    /// The session cookie's name.
+    cookie_name: &'static str,
 }
 
 impl Reply {
@@ -328,6 +361,15 @@ impl Reply {
             kind,
             body: body.as_bytes().to_vec(),
             cookie: None,
+            cookie_name: COOKIE,
+        }
+    }
+
+    /// Plain text, as qBittorrent's API answers most requests.
+    fn text(status: u16, body: &str) -> Self {
+        Self {
+            status,
+            ..Self::file("text/plain; charset=utf-8", body)
         }
     }
 
@@ -337,6 +379,7 @@ impl Reply {
             kind: "application/json",
             body: value.to_string().into_bytes(),
             cookie: None,
+            cookie_name: COOKIE,
         }
     }
 
@@ -356,8 +399,11 @@ impl Reply {
             401 => "Unauthorized",
             403 => "Forbidden",
             404 => "Not Found",
+            409 => "Conflict",
             413 => "Content Too Large",
+            415 => "Unsupported Media Type",
             429 => "Too Many Requests",
+            405 => "Method Not Allowed",
             431 => "Request Header Fields Too Large",
             _ => "Error",
         };
@@ -379,7 +425,8 @@ impl Reply {
             let age = if token.is_empty() { 0 } else { SESSION_LIFE.as_secs() };
             let secure = if secure { "; Secure" } else { "" };
             head.push_str(&format!(
-                "Set-Cookie: {COOKIE}={token}; Path=/; Max-Age={age}; HttpOnly; SameSite=Strict{secure}\r\n"
+                "Set-Cookie: {}={token}; Path=/; Max-Age={age}; HttpOnly; SameSite=Strict{secure}\r\n",
+                self.cookie_name
             ));
         }
         head.push_str("\r\n");
@@ -421,10 +468,36 @@ enum Ask {
         keys: Vec<String>,
         category: Option<String>,
     },
+    /// Slow mode on or off by hand.
+    SlowMode {
+        on: bool,
+    },
+    /// Slow mode's speeds, seeding limits and queue limits. A field left out keeps its
+    /// value. Slow mode's schedule and the transfer schedule are left to the computer.
+    Rules(RulesAsk),
 }
 
+/// The numbers the page may change. 0 means no limit, as in the app.
+#[derive(Deserialize, Debug, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct RulesAsk {
+    slow_down_kib: Option<u32>,
+    slow_up_kib: Option<u32>,
+    ratio_limit_pct: Option<u32>,
+    seed_time_min: Option<u32>,
+    seed_idle_min: Option<u32>,
+    max_downloads: Option<u32>,
+    max_seeding: Option<u32>,
+    max_active: Option<u32>,
+}
+
+/// More than this in any of the rules is a typing mistake, not a wish.
+const MAX_RULE: u32 = 10_000_000;
+
 impl Ask {
-    fn into_command(self) -> Result<Command, &'static str> {
+    /// The commands that carry out the ask. `settings` are the current ones, for the
+    /// values an ask leaves as they are.
+    fn into_commands(self, settings: &Settings) -> Result<Vec<Command>, &'static str> {
         let checked = |keys: Vec<String>| {
             if keys.len() > MAX_KEYS {
                 Err("Too many torrents at once.")
@@ -432,7 +505,7 @@ impl Ask {
                 Ok(keys)
             }
         };
-        Ok(match self {
+        Ok(vec![match self {
             // A path would name a file on the computer, which is not the remote's to read.
             Ask::Add { text } => match intake::parse(&text) {
                 Ok(Source::Link(_)) => Command::Add(text),
@@ -463,8 +536,59 @@ impl Ask {
                     category,
                 }
             }
-        })
+            Ask::SlowMode { on } => Command::SetSlowMode(on),
+            Ask::Rules(r) => {
+                let all = [
+                    r.slow_down_kib,
+                    r.slow_up_kib,
+                    r.ratio_limit_pct,
+                    r.seed_time_min,
+                    r.seed_idle_min,
+                    r.max_downloads,
+                    r.max_seeding,
+                    r.max_active,
+                ];
+                if all.iter().flatten().any(|&n| n > MAX_RULE) {
+                    return Err("One of those numbers is too large.");
+                }
+                let mut limits = settings.limits;
+                let keep = |new: Option<u32>, old: &mut u32| {
+                    if let Some(n) = new {
+                        *old = n;
+                    }
+                };
+                keep(r.slow_down_kib, &mut limits.slow.down_kib);
+                keep(r.slow_up_kib, &mut limits.slow.up_kib);
+                keep(r.seed_time_min, &mut limits.seed_time_min);
+                keep(r.seed_idle_min, &mut limits.seed_idle_min);
+                keep(r.max_seeding, &mut limits.max_seeding);
+                keep(r.max_active, &mut limits.max_active);
+                return Ok(vec![
+                    Command::SetRules {
+                        max_downloads: r.max_downloads.unwrap_or(settings.max_downloads),
+                        ratio_limit_pct: r.ratio_limit_pct.unwrap_or(settings.ratio_limit_pct),
+                        schedule: settings.schedule,
+                    },
+                    Command::SetLimitSettings(limits),
+                ]);
+            }
+        }])
     }
+}
+
+/// Every category name in use or kept, sorted, once each.
+fn category_names(snap: &Snapshot) -> Vec<&String> {
+    let mut categories: Vec<&String> = snap
+        .torrents
+        .iter()
+        .filter_map(|t| t.category.as_ref())
+        .chain(snap.feeds.iter().filter_map(|f| f.feed.category.as_ref()))
+        .chain(snap.settings.categories.iter())
+        .chain(snap.settings.category_dirs.keys())
+        .collect();
+    categories.sort();
+    categories.dedup();
+    categories
 }
 
 fn state_json(snap: &Snapshot) -> serde_json::Value {
@@ -492,16 +616,7 @@ fn state_json(snap: &Snapshot) -> serde_json::Value {
             })
         })
         .collect();
-    let mut categories: Vec<&String> = snap
-        .torrents
-        .iter()
-        .filter_map(|t| t.category.as_ref())
-        .chain(snap.feeds.iter().filter_map(|f| f.feed.category.as_ref()))
-        .chain(snap.settings.categories.iter())
-        .chain(snap.settings.category_dirs.keys())
-        .collect();
-    categories.sort();
-    categories.dedup();
+    let categories = category_names(snap);
     let notices: Vec<serde_json::Value> = snap
         .notices
         .iter()
@@ -520,6 +635,20 @@ fn state_json(snap: &Snapshot) -> serde_json::Value {
         "torrents": torrents,
         "notices": notices,
         "categories": categories,
+        "slow": {
+            "on": snap.slow.is_some(),
+            "by_schedule": snap.slow == Some(SlowReason::Schedule),
+        },
+        "rules": {
+            "slow_down_kib": snap.settings.limits.slow.down_kib,
+            "slow_up_kib": snap.settings.limits.slow.up_kib,
+            "ratio_limit_pct": snap.settings.ratio_limit_pct,
+            "seed_time_min": snap.settings.limits.seed_time_min,
+            "seed_idle_min": snap.settings.limits.seed_idle_min,
+            "max_downloads": snap.settings.max_downloads,
+            "max_seeding": snap.settings.limits.max_seeding,
+            "max_active": snap.settings.limits.max_active,
+        },
     })
 }
 
@@ -557,26 +686,21 @@ impl Server {
         sessions.contains_key(token)
     }
 
-    async fn login(&self, request: &Request) -> Reply {
-        #[derive(Deserialize)]
-        struct Login {
-            password: String,
-        }
-        let Ok(login) = serde_json::from_slice::<Login>(&request.body) else {
-            return Reply::error(400, "The request could not be read.");
-        };
+    /// Checks a password, at most once a second, with a 30-second lock after every fifth
+    /// wrong one.
+    async fn check_password(&self, password: String) -> Check {
         {
-            // One try a second at most, counted before the password is looked at so that
-            // tries sent at the same moment cannot get past it.
+            // Counted before the password is looked at so that tries sent at the same
+            // moment cannot get past it.
             let mut guard = self.guard.lock().unwrap_or_else(|e| e.into_inner());
             let now = Instant::now();
             if guard.locked_until.is_some_and(|until| until > now) {
-                return Reply::error(429, "Too many tries. Wait a little and try again.");
+                return Check::Wait;
             }
             guard.locked_until = Some(now + Duration::from_secs(1));
         }
         let (salt, hash) = (self.salt.clone(), self.hash.clone());
-        let right = tokio::task::spawn_blocking(move || password_matches(&salt, &hash, &login.password))
+        let right = tokio::task::spawn_blocking(move || password_matches(&salt, &hash, &password))
             .await
             .unwrap_or(false);
         let mut guard = self.guard.lock().unwrap_or_else(|e| e.into_inner());
@@ -585,12 +709,15 @@ impl Server {
             if guard.failures.is_multiple_of(5) {
                 guard.locked_until = Some(Instant::now() + Duration::from_secs(30));
             }
-            return Reply::error(401, "Wrong password.");
+            return Check::Wrong;
         }
         guard.failures = 0;
         guard.locked_until = None;
-        drop(guard);
+        Check::Right
+    }
 
+    /// Starts a session and returns its token. The oldest one goes when there are too many.
+    fn new_session(&self) -> String {
         let token = hex(&random(32));
         let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
         if sessions.len() >= MAX_SESSIONS {
@@ -599,9 +726,30 @@ impl Server {
             }
         }
         sessions.insert(token.clone(), Instant::now() + SESSION_LIFE);
-        Reply {
-            cookie: Some(token),
-            ..Reply::ok()
+        token
+    }
+
+    fn end_session(&self, request: &Request) {
+        if let Some(token) = request.cookie() {
+            self.sessions.lock().unwrap_or_else(|e| e.into_inner()).remove(token);
+        }
+    }
+
+    async fn login(&self, request: &Request) -> Reply {
+        #[derive(Deserialize)]
+        struct Login {
+            password: String,
+        }
+        let Ok(login) = serde_json::from_slice::<Login>(&request.body) else {
+            return Reply::error(400, "The request could not be read.");
+        };
+        match self.check_password(login.password).await {
+            Check::Wait => Reply::error(429, "Too many tries. Wait a little and try again."),
+            Check::Wrong => Reply::error(401, "Wrong password."),
+            Check::Right => Reply {
+                cookie: Some(self.new_session()),
+                ..Reply::ok()
+            },
         }
     }
 
@@ -618,7 +766,10 @@ impl Server {
             let same_site = request
                 .header("origin")
                 .is_none_or(|origin| origin.eq_ignore_ascii_case(&format!("{scheme}://{host}")));
-            if request.header("x-rusttorrent") != Some("1") || !same_site {
+            // Programs that use the qBittorrent API cannot send the page's header. Their
+            // session cookie is never sent along from another site, which keeps them safe.
+            let ours = is_qbit(&request.path) || request.header("x-rusttorrent") == Some("1");
+            if !ours || !same_site {
                 return Err(Reply::error(
                     403,
                     "This request did not come from the RustTorrent page.",
@@ -639,7 +790,11 @@ impl Server {
                 .unwrap_or_else(|| t.info_hash.as_string()),
             Err(_) => return Reply::error(400, "This file is not a torrent."),
         };
-        let _ = self.tx.send(Command::AddTorrentBytes(request.body.clone()));
+        let _ = self.tx.send(Command::AddTorrentBytes {
+            bytes: request.body.clone(),
+            category: None,
+            paused: false,
+        });
         Reply::json(200, serde_json::json!({ "ok": true, "name": name }))
     }
 
@@ -652,10 +807,9 @@ impl Server {
             ("GET", "/app.js") => Reply::file("text/javascript; charset=utf-8", SCRIPT),
             ("GET", "/app.css") => Reply::file("text/css; charset=utf-8", STYLE),
             ("POST", "/api/login") => self.login(request).await,
+            (_, path) if is_qbit(path) => self.qbit(request).await,
             ("POST", "/api/logout") => {
-                if let Some(token) = request.cookie() {
-                    self.sessions.lock().unwrap_or_else(|e| e.into_inner()).remove(token);
-                }
+                self.end_session(request);
                 Reply {
                     cookie: Some(String::new()),
                     ..Reply::ok()
@@ -682,9 +836,12 @@ impl Server {
                 let Ok(ask) = serde_json::from_slice::<Ask>(&request.body) else {
                     return Reply::error(400, "The request could not be read.");
                 };
-                match ask.into_command() {
-                    Ok(command) => {
-                        let _ = self.tx.send(command);
+                let settings = self.shared.lock().unwrap_or_else(|e| e.into_inner()).settings.clone();
+                match ask.into_commands(&settings) {
+                    Ok(commands) => {
+                        for command in commands {
+                            let _ = self.tx.send(command);
+                        }
                         Reply::ok()
                     }
                     Err(text) => Reply::error(400, text),
@@ -698,6 +855,7 @@ impl Server {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{State, TorrentView};
 
     #[test]
     fn hex_round_trip() {
@@ -755,11 +913,13 @@ mod tests {
 
     #[test]
     fn asks() {
-        let ask = |text: &str| {
+        let settings = Settings::default();
+        let asks = |text: &str| {
             serde_json::from_str::<Ask>(text)
                 .map_err(|_| "unreadable")
-                .and_then(Ask::into_command)
+                .and_then(|a| a.into_commands(&settings))
         };
+        let ask = |text: &str| asks(text).map(|mut c| c.remove(0));
         assert!(matches!(
             ask(r#"{"do":"add","text":"magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567"}"#),
             Ok(Command::Add(_))
@@ -791,6 +951,24 @@ mod tests {
         ));
         let long = format!(r#"{{"do":"category","keys":["a"],"category":"{}"}}"#, "x".repeat(101));
         assert!(ask(&long).is_err());
+        assert!(matches!(
+            ask(r#"{"do":"slow_mode","on":true}"#),
+            Ok(Command::SetSlowMode(true))
+        ));
+        // Rules change only what is given, and keep the schedule.
+        let rules = asks(r#"{"do":"rules","max_downloads":3,"seed_time_min":60,"slow_up_kib":5}"#).unwrap();
+        assert!(matches!(
+            &rules[0],
+            Command::SetRules { max_downloads: 3, ratio_limit_pct: 0, schedule } if *schedule == settings.schedule
+        ));
+        let Command::SetLimitSettings(limits) = &rules[1] else {
+            panic!("{rules:?}")
+        };
+        assert_eq!((limits.seed_time_min, limits.slow.up_kib), (60, 5));
+        assert_eq!(limits.slow.down_kib, settings.limits.slow.down_kib);
+        assert_eq!(limits.max_active, settings.limits.max_active);
+        assert!(asks(r#"{"do":"rules","max_active":99999999}"#).is_err());
+        assert!(asks(r#"{"do":"rules","schedule":{}}"#).is_err());
         // Not one of the things the remote may do.
         assert!(ask(r#"{"do":"set_interface","name":"en0"}"#).is_err());
     }
@@ -883,7 +1061,7 @@ mod tests {
         let (status, _, body) = send(port, post(port, "/api/upload", &both, torrent)).await;
         assert_eq!(status, 200, "{body}");
         assert!(body.contains("a.txt"));
-        assert!(matches!(rx.try_recv(), Ok(Command::AddTorrentBytes(b)) if b == torrent.as_bytes()));
+        assert!(matches!(rx.try_recv(), Ok(Command::AddTorrentBytes { bytes, .. }) if bytes == torrent.as_bytes()));
         let (status, _, body) = send(port, post(port, "/api/upload", &both, "hello")).await;
         assert_eq!(status, 400);
         assert!(body.contains("not a torrent"));
@@ -908,6 +1086,158 @@ mod tests {
         // Signing out ends the session.
         assert_eq!(send(port, post(port, "/api/logout", &both, "")).await.0, 200);
         assert_eq!(send(port, format!("{state}{signed}\r\n")).await.0, 401);
+        server.abort();
+    }
+
+    /// The qBittorrent API as Sonarr or a phone app would use it.
+    #[tokio::test]
+    async fn a_qbittorrent_visit() {
+        let (salt, hash) = hash_password("correct horse");
+        let listener = listen(false, 0).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let key = "ab".repeat(20);
+        let mut seeding = TorrentView::sample(&key, State::Seeding, 10, 10);
+        seeding.category = Some("tv".into());
+        seeding.up_bps = 3;
+        let other = TorrentView::sample(&"cd".repeat(20), State::Paused, 0, 10);
+        let snap = Snapshot {
+            torrents: vec![seeding, other],
+            ..Snapshot::default()
+        };
+        let shared: Shared = Arc::new(Mutex::new(Arc::new(snap)));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let server = tokio::spawn(serve(
+            listener,
+            unhex(&salt).unwrap(),
+            unhex(&hash).unwrap(),
+            shared,
+            tx,
+            None,
+        ));
+        let form = "Content-Type: application/x-www-form-urlencoded\r\n";
+        let get = |path: &str, extra: &str| format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{extra}\r\n");
+
+        // Nothing without signing in; a wrong password is "Fails.", as qBittorrent says it.
+        let (status, _, body) = send(port, get("/api/v2/app/version", "")).await;
+        assert_eq!((status, body.as_str()), (403, "Forbidden"));
+        let (status, _, body) = send(
+            port,
+            post(port, "/api/v2/auth/login", form, "username=admin&password=no"),
+        )
+        .await;
+        assert_eq!((status, body.as_str()), (200, "Fails."));
+        // A login from another site's page is refused before the password is looked at.
+        let foreign = format!("{form}Origin: http://evil.example\r\n");
+        let good = "username=admin&password=correct+horse";
+        assert_eq!(
+            send(port, post(port, "/api/v2/auth/login", &foreign, good)).await.0,
+            403
+        );
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        let (status, head, body) = send(port, post(port, "/api/v2/auth/login", form, good)).await;
+        assert_eq!((status, body.as_str()), (200, "Ok."));
+        let cookie = head
+            .lines()
+            .find_map(|l| l.strip_prefix("Set-Cookie: "))
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        assert!(cookie.starts_with("SID="), "{cookie}");
+        let signed = format!("Cookie: {cookie}\r\n");
+
+        let (_, _, body) = send(port, get("/api/v2/app/webapiVersion", &signed)).await;
+        assert_eq!(body, "2.9.3");
+        let (status, _, body) = send(port, get("/api/v2/torrents/info?category=tv", &signed)).await;
+        assert_eq!(status, 200);
+        let list: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(list.as_array().unwrap().len(), 1);
+        assert_eq!(list[0]["hash"], key.as_str());
+        assert_eq!(list[0]["state"], "uploading");
+        assert_eq!(list[0]["category"], "tv");
+        let (_, _, body) = send(port, get("/api/v2/torrents/info?filter=paused", &signed)).await;
+        assert!(body.contains("pausedDL") && !body.contains(&key), "{body}");
+        let (_, _, body) = send(port, get("/api/v2/sync/maindata?rid=4", &signed)).await;
+        let main: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(main["rid"], 5);
+        assert_eq!(main["torrents"].as_object().unwrap().len(), 2);
+        assert!(main["categories"]["tv"].is_object());
+
+        // Changing something needs a POST.
+        let pause = format!("hashes={key}%7C{}", "0".repeat(40));
+        let (status, ..) = send(port, get(&format!("/api/v2/torrents/pause?{pause}"), &signed)).await;
+        assert_eq!(status, 405);
+        let both = format!("{form}{signed}");
+        assert_eq!(
+            send(port, post(port, "/api/v2/torrents/pause", &both, &pause)).await.0,
+            200
+        );
+        assert!(matches!(rx.try_recv(), Ok(Command::Pause(keys)) if keys == [key.clone()]));
+        // From another site, even with the cookie, it is refused.
+        let foreign = format!("{both}Origin: http://evil.example\r\n");
+        assert_eq!(
+            send(port, post(port, "/api/v2/torrents/pause", &foreign, &pause))
+                .await
+                .0,
+            403
+        );
+        assert!(rx.try_recv().is_err());
+
+        let limits = format!("hashes={key}&ratioLimit=2&seedingTimeLimit=-1&inactiveSeedingTimeLimit=-2");
+        assert_eq!(
+            send(port, post(port, "/api/v2/torrents/setShareLimits", &both, &limits))
+                .await
+                .0,
+            200
+        );
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Command::SetRatioLimit { limit: Some(200), .. })
+        ));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Command::SetSeedingLimits {
+                time_limit_min: Some(0),
+                idle_limit_min: None,
+                ..
+            })
+        ));
+
+        // Adding: a link with a category, then a torrent file as Sonarr sends it.
+        let magnet = format!("magnet:?xt=urn:btih:{}", "ef".repeat(20));
+        let add = format!(
+            "urls={}&category=tv&paused=true",
+            magnet.replace(':', "%3A").replace('?', "%3F")
+        );
+        let (status, _, body) = send(port, post(port, "/api/v2/torrents/add", &both, &add)).await;
+        assert_eq!((status, body.as_str()), (200, "Ok."));
+        assert!(matches!(rx.try_recv(),
+            Ok(Command::AddWith(o)) if o.text == magnet && o.category.as_deref() == Some("tv") && o.paused));
+        let torrent = "d4:infod6:lengthi1e4:name5:a.txt12:piece lengthi16384e6:pieces20:aaaaaaaaaaaaaaaaaaaaee";
+        let body = format!(
+            "--b0und\r\nContent-Disposition: form-data; name=\"torrents\"; filename=\"a.torrent\"\r\n\
+             Content-Type: application/x-bittorrent\r\n\r\n{torrent}\r\n--b0und--\r\n"
+        );
+        let multipart = format!("Content-Type: multipart/form-data; boundary=b0und\r\n{signed}");
+        let (status, _, reply) = send(port, post(port, "/api/v2/torrents/add", &multipart, &body)).await;
+        assert_eq!((status, reply.as_str()), (200, "Ok."));
+        assert!(matches!(rx.try_recv(), Ok(Command::AddTorrentBytes { bytes, .. }) if bytes == torrent.as_bytes()));
+        // A path on this computer is not something the API may add.
+        let (status, ..) = send(port, post(port, "/api/v2/torrents/add", &both, "urls=%2Fetc%2Fpasswd")).await;
+        assert_eq!(status, 415);
+        assert!(rx.try_recv().is_err());
+        assert_eq!(
+            send(port, post(port, "/api/v2/torrents/setLocation", &both, &pause))
+                .await
+                .0,
+            403
+        );
+        assert_eq!(send(port, get("/api/v2/no/such", &signed)).await.0, 404);
+
+        // Signing out ends the session.
+        assert_eq!(send(port, post(port, "/api/v2/auth/logout", &both, "")).await.0, 200);
+        assert_eq!(send(port, get("/api/v2/app/version", &signed)).await.0, 403);
         server.abort();
     }
 }

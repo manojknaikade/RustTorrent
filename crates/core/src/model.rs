@@ -108,6 +108,41 @@ pub struct TorrentView {
 }
 
 impl TorrentView {
+    /// A torrent with nothing set but these, for tests.
+    #[cfg(test)]
+    pub(crate) fn sample(key: &str, state: State, done: u64, total: u64) -> Self {
+        Self {
+            key: key.into(),
+            name: "n".into(),
+            state,
+            error: None,
+            total,
+            done,
+            uploaded: 0,
+            down_bps: 0,
+            up_bps: 0,
+            peers_live: 0,
+            peers_seen: 0,
+            category: None,
+            tags: Vec::new(),
+            save_path: String::new(),
+            added_at: 0,
+            held: None,
+            queue_pos: None,
+            ratio_limit_pct: None,
+            files: Arc::default(),
+            file_done: Vec::new(),
+            selected: None,
+            trackers: Arc::default(),
+            peers: Vec::new(),
+            force_start: false,
+            limits: Default::default(),
+            down_limit_kib: 0,
+            up_limit_kib: 0,
+            priorities: Default::default(),
+        }
+    }
+
     pub fn progress(&self) -> f32 {
         if self.total == 0 {
             0.0
@@ -180,14 +215,17 @@ pub struct Snapshot {
     pub running_since: u64,
     /// Downloads that finished while the app was running, oldest first.
     pub finished: Vec<crate::comfort::Finished>,
-    /// Every download has finished and the user asked the app to quit then.
-    pub quit_now: bool,
+    /// Counts up each time every download has finished and the user asked for something
+    /// to happen then (quit, sleep or shut down). The front end acts when it goes up.
+    pub all_done: u64,
     /// Which pieces are done, for the torrent the front end asked about with `Watch`.
     pub pieces: Option<Arc<crate::comfort::PieceMap>>,
     /// A feed's items as last read for the window to show, if it asked for them.
     pub feed_preview: Option<FeedPreview>,
     /// The SHA-256 fingerprint of the remote-control page's certificate, while it uses HTTPS.
     pub remote_fingerprint: Option<String>,
+    /// Files that can be played while they download, with their addresses.
+    pub streams: Vec<crate::StreamLink>,
 }
 
 /// One feed's items, read so the user can see what its filter takes before saving it.

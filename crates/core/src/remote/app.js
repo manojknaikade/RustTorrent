@@ -6,6 +6,10 @@ const $ = (id) => document.getElementById(id);
 const rows = new Map(); // torrent key -> the parts of its list entry
 let timer = null;
 let limitsShown = "";
+let rulesShown = "";
+let slowOn = false;
+const RULES = ["slow_down_kib", "slow_up_kib", "ratio_limit_pct", "seed_time_min", "seed_idle_min",
+  "max_downloads", "max_seeding", "max_active"];
 let categories = [];
 const MAX_UPLOAD = 4 * 1024 * 1024; // the same as the app's
 
@@ -147,6 +151,15 @@ function draw(state) {
     $("limit-down").value = state.down_limit_kib;
     $("limit-up").value = state.up_limit_kib;
   }
+  const rules = JSON.stringify(state.rules || {});
+  if (state.rules && rules !== rulesShown) {
+    rulesShown = rules;
+    for (const name of RULES) $("rule-" + name).value = state.rules[name];
+  }
+  slowOn = !!(state.slow && state.slow.on);
+  const slow = $("slow");
+  slow.setAttribute("aria-pressed", String(slowOn));
+  slow.textContent = slowOn ? (state.slow.by_schedule ? "Slow mode on (schedule)" : "Slow mode on") : "Slow mode";
   $("footer").textContent = "RustTorrent " + state.version;
   categories = state.categories || [];
 }
@@ -288,6 +301,17 @@ $("limits-form").addEventListener("submit", async (event) => {
   if (await command({ do: "limits", down_kib: number("limit-down"), up_kib: number("limit-up") })) {
     say("Limits set.");
   }
+});
+
+$("rules-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const body = { do: "rules" };
+  for (const name of RULES) body[name] = Math.max(0, Math.floor(Number($("rule-" + name).value) || 0));
+  if (await command(body)) say("Rules set.");
+});
+
+$("slow").addEventListener("click", () => {
+  command({ do: "slow_mode", on: !slowOn });
 });
 
 document.addEventListener("visibilitychange", () => {

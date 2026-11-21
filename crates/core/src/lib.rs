@@ -6,10 +6,12 @@
 pub mod arbiter;
 pub mod blocklist;
 pub mod comfort;
+pub mod disk;
 mod engine;
 pub mod episodes;
 pub mod feeds;
 pub mod format;
+pub mod import;
 pub mod intake;
 pub mod limits;
 mod logfile;
@@ -23,6 +25,7 @@ pub mod relocate;
 pub mod remote;
 pub mod rules;
 pub mod store;
+mod stream;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -41,6 +44,7 @@ pub use network::{NetworkSettings, NetworkStatus, ProxySettings};
 pub use priority::{FilePriorities, Priority};
 pub use rules::{Move, Schedule};
 pub use store::{RemoteSettings, Settings};
+pub use stream::StreamLink;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 

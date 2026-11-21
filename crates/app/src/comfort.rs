@@ -41,6 +41,9 @@ pub fn ink(c: Color32) -> Color32 {
     }
 }
 
+/// How long the sleep or shut-down countdown lasts.
+const POWER_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
 fn now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -57,6 +60,11 @@ pub struct Extras {
     theme: Option<Theme>,
     asked: bool,
     closing: bool,
+    /// The last "all downloads finished" count acted on.
+    all_done: u64,
+    /// Sleep or shut down at this time, unless cancelled.
+    countdown: Option<(std::time::Instant, WhenAllDone)>,
+    power_error: Option<String>,
     pub stats: bool,
     pub log: Option<LogView>,
 }
@@ -98,14 +106,81 @@ impl Extras {
                 .any(|t| matches!(t.state, State::Downloading | State::FetchingInfo | State::Checking));
         self.awake.hold(c.keep_awake && busy);
 
-        if snap.quit_now && !self.closing {
-            self.closing = true;
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        if snap.all_done > self.all_done {
+            self.all_done = snap.all_done;
+            match c.when_all_done {
+                WhenAllDone::Nothing => {}
+                WhenAllDone::Quit => {
+                    if !self.closing {
+                        self.closing = true;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                }
+                when => {
+                    self.countdown = Some((std::time::Instant::now() + POWER_WAIT, when));
+                    self.power_error = None;
+                }
+            }
         }
+        if let Some((at, when)) = self.countdown {
+            if std::time::Instant::now() >= at {
+                self.countdown = None;
+                self.power_error = rusttorrent_core::comfort::power(when).err();
+            } else {
+                ctx.request_repaint_after(std::time::Duration::from_millis(500));
+            }
+        }
+    }
+
+    /// Asks whether to sleep or shut down, with the seconds left.
+    fn power_window(&mut self, ctx: &egui::Context) {
+        if let Some(text) = self.power_error.clone() {
+            let mut open = true;
+            egui::Window::new("All downloads finished")
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    ui.label(text);
+                });
+            if !open {
+                self.power_error = None;
+            }
+        }
+        let Some((at, when)) = self.countdown else {
+            return;
+        };
+        let left = at.saturating_duration_since(std::time::Instant::now()).as_secs() + 1;
+        let what = if when == WhenAllDone::Sleep {
+            "go to sleep"
+        } else {
+            "shut down"
+        };
+        let computer = if cfg!(target_os = "macos") {
+            "The Mac"
+        } else {
+            "The computer"
+        };
+        egui::Window::new("All downloads finished")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.label(format!("{computer} will {what} in {left} seconds."));
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        self.countdown = None;
+                    }
+                    if ui.button("Now").clicked() {
+                        self.countdown = Some((std::time::Instant::now(), when));
+                    }
+                });
+            });
     }
 
     /// The statistics and log windows, when open.
     pub fn windows(&mut self, ctx: &egui::Context, snap: &Snapshot) {
+        self.power_window(ctx);
         let mut open_log = false;
         let mut stats = self.stats;
         egui::Window::new("Statistics")
@@ -417,7 +492,29 @@ pub fn settings_section(ui: &mut egui::Ui, c: &mut ComfortSettings) -> (bool, bo
         ui.label("When all downloads finish");
         ui.radio_value(&mut c.when_all_done, WhenAllDone::Nothing, "Do nothing");
         ui.radio_value(&mut c.when_all_done, WhenAllDone::Quit, "Quit RustTorrent");
+        let computer = if cfg!(target_os = "macos") {
+            "the Mac"
+        } else {
+            "the computer"
+        };
+        ui.radio_value(
+            &mut c.when_all_done,
+            WhenAllDone::Sleep,
+            format!("Put {computer} to sleep"),
+        );
+        ui.radio_value(
+            &mut c.when_all_done,
+            WhenAllDone::ShutDown,
+            format!("Shut {computer} down"),
+        );
     });
+    if matches!(c.when_all_done, WhenAllDone::Sleep | WhenAllDone::ShutDown) {
+        ui.label(
+            RichText::new("A 30-second countdown with a Cancel button comes first. Only downloads that finish after this is chosen count.")
+                .small()
+                .weak(),
+        );
+    }
     ui.add_space(6.0);
     if cfg!(target_os = "macos") {
         ui.checkbox(&mut c.keep_awake, "Keep the Mac awake while downloading or uploading");

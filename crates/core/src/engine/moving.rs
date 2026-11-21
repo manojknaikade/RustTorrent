@@ -81,7 +81,8 @@ impl Worker {
         }
     }
 
-    /// Starts moving one torrent's data to `dir`. Returns whether the move started.
+    /// Starts moving one torrent's data to `dir`, in a folder of its own name there when
+    /// it has several files. Returns whether the move started.
     async fn start_move(&mut self, key: &str, dir: &Path, announce: bool) -> bool {
         let Some(session) = self.session.clone() else {
             return false;
@@ -89,9 +90,6 @@ impl Worker {
         let Some(handle) = self.find(key) else { return false };
         let name = handle.name().unwrap_or_else(|| key.to_owned());
         let from = handle.output_folder().to_path_buf();
-        if from == dir {
-            return false;
-        }
         let Ok((torrent, info, files)) = handle.with_metadata(|m| {
             let files: Vec<PathBuf> = (m.file_infos.iter())
                 .filter(|f| !f.attrs.padding)
@@ -109,6 +107,14 @@ impl Worker {
         } else {
             torrent.to_vec()
         };
+        // A torrent with several files goes in a folder of its own name there.
+        let to = match manage::sub_folder(&bytes) {
+            Some(own) => dir.join(own),
+            None => dir.to_path_buf(),
+        };
+        if from == to {
+            return false;
+        }
         let path = self.move_file(key);
         let written = path
             .parent()
@@ -123,7 +129,7 @@ impl Worker {
         }
         let note = MoveNote {
             from,
-            to: dir.to_path_buf(),
+            to: to.clone(),
             files,
             only_files: handle.only_files(),
             announce,
@@ -142,7 +148,7 @@ impl Worker {
             self.notice(format!("Could not move {name}: {e:#}"), true);
             return false;
         }
-        self.notice(format!("Moving {name} to {}", dir.display()), false);
+        self.notice(format!("Moving {name} to {}", to.display()), false);
         true
     }
 

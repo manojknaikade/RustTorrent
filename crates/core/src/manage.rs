@@ -54,19 +54,23 @@ pub fn folder_for(settings: &Settings, chosen: Option<&PathBuf>, category: Optio
 /// when it stays). With a folder for unfinished downloads it starts there, unless that
 /// is already its own folder, or some of its files are in its own folder already: then
 /// it uses the data that is there instead of downloading it again. `files` is `None`
-/// when they are not known yet, as for a magnet link added without the add dialog.
+/// when they are not known yet. `own` gives the folder the files go in, inside a folder
+/// (see [`data_folder`]); the folder it moves to is the one above, as a move puts the
+/// files in a folder of their own again.
 pub(crate) fn start_folder(
     incomplete: Option<&Path>,
     folder: &Path,
     files: Option<&[PathBuf]>,
+    own: impl Fn(&Path) -> PathBuf,
 ) -> (PathBuf, Option<PathBuf>) {
+    let here = own(folder);
     let Some(incomplete) = incomplete.filter(|d| *d != folder) else {
-        return (folder.to_path_buf(), None);
+        return (here, None);
     };
-    if files.is_some_and(|files| files.iter().any(|f| folder.join(f).exists())) {
-        return (folder.to_path_buf(), None);
+    if files.is_some_and(|files| files.iter().any(|f| here.join(f).exists())) {
+        return (here, None);
     }
-    (incomplete.to_path_buf(), Some(folder.to_path_buf()))
+    (own(incomplete), Some(folder.to_path_buf()))
 }
 
 /// A torrent's files from its bytes, relative to its folder, without padding files.
@@ -77,6 +81,38 @@ pub(crate) fn torrent_files(bytes: &[u8]) -> Option<Vec<PathBuf>> {
         .map(|f| f.filename.to_pathbuf())
         .collect();
     Some(files)
+}
+
+/// The name of the folder a torrent's files go in: its own name when it has several
+/// files, as other apps do. `None` for a torrent of one file, for bytes that are not a
+/// torrent, and for a name that is not one plain folder name, which could point outside
+/// the folder it is saved in.
+pub(crate) fn sub_folder(bytes: &[u8]) -> Option<String> {
+    let info = librqbit::torrent_from_bytes(bytes).ok()?.info.data.validate().ok()?;
+    info.info().files.as_ref()?;
+    let name = info.name()?.into_owned();
+    let mut parts = Path::new(&name).components();
+    let (Some(std::path::Component::Normal(_)), None) = (parts.next(), parts.next()) else {
+        return None;
+    };
+    Some(name)
+}
+
+/// The folder that holds a torrent's files when it is saved in `parent`: a folder of its
+/// own name there when it has several files (see [`sub_folder`]), as the engine is given
+/// the folder that holds the files themselves. If that folder is missing but the files
+/// sit straight in `parent` (qBittorrent can save them so, and earlier versions of this
+/// app did), `parent` is used, so that data is not downloaded again.
+pub(crate) fn data_folder(bytes: &[u8], parent: &Path) -> PathBuf {
+    let Some(name) = sub_folder(bytes) else {
+        return parent.to_path_buf();
+    };
+    let own = parent.join(name);
+    let straight = || torrent_files(bytes).is_some_and(|files| files.iter().any(|f| parent.join(f).exists()));
+    if !own.exists() && straight() {
+        return parent.to_path_buf();
+    }
+    own
 }
 
 /// A magnet link for a torrent in the list: its info-hash, name and trackers.
@@ -239,7 +275,7 @@ fn label_of(text: &str) -> String {
         .unwrap_or_else(|_| text.to_owned())
 }
 
-async fn inspect(session: &Arc<Session>, text: &str) -> Result<(String, Vec<FileMeta>, Prepared), String> {
+pub(crate) async fn inspect(session: &Arc<Session>, text: &str) -> Result<(String, Vec<FileMeta>, Prepared), String> {
     let mut trackers = Vec::new();
     let add = match intake::parse(text)? {
         Source::Link(url) => {
@@ -302,19 +338,28 @@ mod tests {
         let dir = scratch("start");
         let (done, unfinished) = (dir.join("done"), dir.join("unfinished"));
         let files = [PathBuf::from("a.txt"), PathBuf::from("b/c.bin")];
+        // The files go in a folder of the torrent's name inside each folder.
+        let own = |d: &Path| d.join("Name");
         // No folder for unfinished downloads, or the same folder: straight in.
-        assert_eq!(start_folder(None, &done, Some(&files)), (done.clone(), None));
-        assert_eq!(start_folder(Some(&done), &done, Some(&files)), (done.clone(), None));
-        // The normal case, and when the files are not known yet.
-        let kept = (unfinished.clone(), Some(done.clone()));
-        assert_eq!(start_folder(Some(&unfinished), &done, Some(&files)), kept);
-        assert_eq!(start_folder(Some(&unfinished), &done, None), kept);
-        // Part of the data is in its own folder already: use it there.
+        assert_eq!(start_folder(None, &done, Some(&files), own), (done.join("Name"), None));
+        assert_eq!(
+            start_folder(Some(&done), &done, Some(&files), own),
+            (done.join("Name"), None)
+        );
+        // The normal case, and when the files are not known yet. It moves to the folder
+        // above its own, as the move adds the torrent's name again.
+        let kept = (unfinished.join("Name"), Some(done.clone()));
+        assert_eq!(start_folder(Some(&unfinished), &done, Some(&files), own), kept);
+        assert_eq!(start_folder(Some(&unfinished), &done, None, own), kept);
+        // Part of the data straight in the folder does not count; in its own folder it does.
         std::fs::create_dir_all(done.join("b")).unwrap();
         std::fs::write(done.join("b/c.bin"), b"part").unwrap();
+        assert_eq!(start_folder(Some(&unfinished), &done, Some(&files), own), kept);
+        std::fs::create_dir_all(done.join("Name/b")).unwrap();
+        std::fs::write(done.join("Name/b/c.bin"), b"part").unwrap();
         assert_eq!(
-            start_folder(Some(&unfinished), &done, Some(&files)),
-            (done.clone(), None)
+            start_folder(Some(&unfinished), &done, Some(&files), own),
+            (done.join("Name"), None)
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -335,6 +380,42 @@ mod tests {
         let files = torrent_files(&bytes).unwrap();
         assert_eq!(files, [PathBuf::from("a.txt"), PathBuf::from("b/c.bin")]);
         assert_eq!(torrent_files(b"not a torrent"), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn data_folder_of_another_app() {
+        let dir = scratch("data");
+        let src = dir.join("Folder");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("a.txt"), vec![1u8; 5_000]).unwrap();
+        std::fs::write(src.join("b.txt"), vec![2u8; 5_000]).unwrap();
+        let make = |source: PathBuf, out: &str| {
+            let opts = crate::make::MakeOptions {
+                source,
+                save_to: dir.join(out),
+                ..Default::default()
+            };
+            crate::make::make(&opts, &crate::make::Progress::default()).unwrap()
+        };
+        let several = make(src.clone(), "several.torrent");
+        let one = make(src.join("a.txt"), "one.torrent");
+        let parent = dir.join("saved");
+        // Several files have a folder of the torrent's name; one file does not.
+        assert_eq!(sub_folder(&several).as_deref(), Some("Folder"));
+        assert_eq!(sub_folder(&one), None);
+        assert_eq!(sub_folder(b"not a torrent"), None);
+        // Nothing there yet: the torrent's own folder.
+        assert_eq!(data_folder(&several, &parent), parent.join("Folder"));
+        assert_eq!(data_folder(&one, &parent), parent.clone());
+        // Files straight in the folder, with no folder of the torrent's name.
+        std::fs::create_dir_all(&parent).unwrap();
+        std::fs::write(parent.join("a.txt"), b"x").unwrap();
+        assert_eq!(data_folder(&several, &parent), parent.clone());
+        // Once the folder of its name is there, that is used.
+        std::fs::create_dir_all(parent.join("Folder")).unwrap();
+        assert_eq!(data_folder(&several, &parent), parent.join("Folder"));
+        assert_eq!(data_folder(b"not a torrent", &parent), parent.clone());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

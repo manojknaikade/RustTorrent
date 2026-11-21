@@ -32,7 +32,9 @@ The tables were first written against 0.6. A row now says which release closed i
 | Add, edit or remove a torrent's trackers | Missing | Engine lacks it |
 | Create a `.torrent` from a file or folder | Has it (0.12) | Trackers in tiers, piece size, comment, private, start seeding |
 | Delete the `.torrent` file after adding | Partly | Watch folder renames it instead |
-| Several watch folders, each with its own options | Missing | One folder |
+| Several watch folders, each with its own options | Partly (0.14) | Several folders, each with its own category |
+| Import torrents from another client | Has it (0.14) | Transmission and qBittorrent; tested against hand-made files only |
+| Pause when the disk is nearly full | Has it (0.14) | Paused, not resumed by itself |
 
 ### Order and priority
 
@@ -41,6 +43,7 @@ The tables were first written against 0.6. A row now says which release closed i
 | Switch in-order download off (rarest pieces first) | Missing | Engine lacks it. Rarest-first is healthier for a swarm with few seeders |
 | File priority: high, normal, low | Has it | Patched engine; priority sets the order files download in |
 | Download first and last pieces first | Has it | Always on |
+| Play a file while it downloads | Has it (0.14) | Play or Copy link in the Files tab; the parts being read come first |
 
 ### Limits
 
@@ -80,7 +83,7 @@ The tables were first written against 0.6. A row now says which release closed i
 | All-time statistics | Has it (0.10) |  |
 | Log viewer in the app | Has it (0.10) |  |
 | Run a program when a download finishes | Has it (0.10) | Run directly, not through a shell |
-| Shut down or sleep when all downloads finish | Partly (0.10) | Can quit the app; does not shut down or sleep the Mac |
+| Shut down or sleep when all downloads finish | Has it (0.14) | After a 30-second countdown; checked by automated tests only |
 | Peer's country and client flags | Partly | Client name is shown |
 | Filter the list by tracker | Has it (0.10) |  |
 | Choose which columns are shown | Has it (0.10) |  |
@@ -96,10 +99,10 @@ The tables were first written against 0.6. A row now says which release closed i
 | --- | --- | --- |
 | RSS rules with regular expressions and episode filters ("S02E05 and later") | Has it (0.11) |  |
 | RSS: read articles in the app, smart episode filter (skip repeats) | Has it (0.11) | Preview of a feed's items with a Download button each; repeats of an episode are skipped |
-| Remote: everything the desktop window can do | Partly | Add link or file, pause, resume, remove, files, category, main speed limits |
+| Remote: everything the desktop window can do | Partly | Add link or file, pause, resume, remove, files, category, speed limits, slow mode, seeding and queue limits. Not folders or schedules |
 | Remote: upload a `.torrent` file | Has it (0.11) |  |
 | Remote: HTTPS | Has it (0.11) | Self-made certificate, so the browser warns once |
-| Remote: API that other apps (phone apps, Sonarr, Radarr) can use | Missing | Left out of 0.11 |
+| Remote: API that other apps (phone apps, Sonarr, Radarr) can use | Partly (0.14) | A part of qBittorrent's Web API 2.9.3. No folders or preference changes. Not tried with the real apps |
 | Search engine with plugins | Not planned | Plugins were ruled out |
 | Email on completion, lock the window with a password | Not planned | |
 
@@ -112,10 +115,10 @@ The six releases planned here were built together and published as one, 0.12.0.
 **Planned but left out.**
 
 - Menu-bar icon and running with the window closed (0.10).
-- A copy of qBittorrent's API for phone apps and other tools (0.11).
+- A copy of qBittorrent's API for phone apps and other tools (0.11). Built later, after 0.13.4.
 - A separate folder for unfinished downloads (0.7). Built later, after 0.13.4.
 - Binding the remote-control page to the chosen network interface (0.9).
-- The remote page cannot see or set slow mode, the seeding limits or the queue limits.
+- The remote page cannot see or set slow mode, the seeding limits or the queue limits. Built later, after 0.13.4.
 
 **The engine checks failed for these**, so they are not built and are not faked: upload slots, a peer-exchange switch, adding a peer by hand, per-piece availability.
 

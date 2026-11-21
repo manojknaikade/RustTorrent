@@ -23,6 +23,7 @@
   <header>
     <h1>RustTorrent</h1>
     <span id="speeds" class="muted"></span>
+    <button id="slow" aria-pressed="false" title="Slow mode: the second, lower set of speed limits">Slow mode</button>
     <button id="sign-out" class="quiet">Sign out</button>
   </header>
 
@@ -46,6 +47,22 @@
       <label>Upload, KiB/s <input id="limit-up" type="number" min="0" max="4000000" inputmode="numeric"></label>
       <button>Set</button>
       <span class="muted">0 means no limit.</span>
+    </form>
+  </details>
+
+  <details class="card">
+    <summary>Slow mode, seeding and queue</summary>
+    <form id="rules-form" class="limits">
+      <label>Slow mode download, KiB/s <input id="rule-slow_down_kib" type="number" min="0" max="4000000" inputmode="numeric"></label>
+      <label>Slow mode upload, KiB/s <input id="rule-slow_up_kib" type="number" min="0" max="4000000" inputmode="numeric"></label>
+      <label>Stop seeding at ratio, % <input id="rule-ratio_limit_pct" type="number" min="0" max="1000000" inputmode="numeric"></label>
+      <label>Stop seeding after, minutes <input id="rule-seed_time_min" type="number" min="0" max="10000000" inputmode="numeric"></label>
+      <label>Stop after no upload for, minutes <input id="rule-seed_idle_min" type="number" min="0" max="10000000" inputmode="numeric"></label>
+      <label>Downloads at once <input id="rule-max_downloads" type="number" min="0" max="100000" inputmode="numeric"></label>
+      <label>Seeding at once <input id="rule-max_seeding" type="number" min="0" max="100000" inputmode="numeric"></label>
+      <label>Active at once <input id="rule-max_active" type="number" min="0" max="100000" inputmode="numeric"></label>
+      <button>Set</button>
+      <span class="muted">0 means no limit. A ratio of 1.5 is 150%. Schedules are set in the app.</span>
     </form>
   </details>
 

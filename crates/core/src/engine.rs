@@ -10,7 +10,7 @@
 //! it is back. While there is no session nothing is sent or received.
 use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU32;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -26,13 +26,14 @@ use chrono::{Datelike, Timelike};
 
 use crate::arbiter::{decide, Decision, HoldReason, Intent};
 use crate::feeds::{self, Feed};
+use crate::import::{self, Client};
 use crate::intake::{self, Source};
 use crate::limits::{LimitSettings, TorrentLimits};
 use crate::manage::{self, AddOptions, Inspector, Prepared};
 use crate::model::{FeedView, FileMeta, Notice, PeerView, Snapshot, State, TorrentView};
 use crate::net::{self, Interface};
 use crate::rules::{self, Clock, Move, Schedule};
-use crate::store::{Record, Store};
+use crate::store::{Record, Store, WatchFolder};
 use crate::{now_secs, Shared};
 
 mod feed_preview;
@@ -100,8 +101,8 @@ pub enum Command {
         lan: bool,
         password: Option<String>,
     },
-    /// The folder to watch for `.torrent` files, or none.
-    SetWatchDir(Option<PathBuf>),
+    /// The folders to watch for `.torrent` files, each with the category it gives.
+    SetWatchDirs(Vec<WatchFolder>),
     /// Replaces the list of feeds.
     SetFeeds(Vec<Feed>),
     /// Read every feed now instead of waiting for its turn.
@@ -130,6 +131,10 @@ pub enum Command {
     RemoveCategory(String),
     /// Whether adding from the window shows the add dialog first.
     SetAskBeforeAdd(bool),
+    /// Pause downloads when less than this many MiB is free on their disk. 0 is off.
+    SetKeepFree(u64),
+    /// Take over the torrents of another app, kept in this folder.
+    Import(Client, PathBuf),
     Shutdown,
     /// Turn slow mode on or off by hand.
     SetSlowMode(bool),
@@ -188,10 +193,21 @@ pub enum Command {
         item: feeds::Item,
         category: Option<String>,
     },
-    /// A `.torrent` file's contents, sent from the remote-control page.
-    AddTorrentBytes(Vec<u8>),
+    /// A `.torrent` file's contents, sent from the remote-control page or the
+    /// qBittorrent-style API.
+    AddTorrentBytes {
+        bytes: Vec<u8>,
+        category: Option<String>,
+        paused: bool,
+    },
     /// Serve the remote-control page over HTTPS instead of plain HTTP.
     SetRemoteHttps(bool),
+    /// Make one file of a torrent playable while it downloads. Its address shows up in
+    /// [`Snapshot::streams`](crate::Snapshot::streams).
+    Play {
+        key: String,
+        file: usize,
+    },
 }
 
 type Handle = Arc<ManagedTorrent>;
@@ -200,6 +216,8 @@ type OnChange = Arc<dyn Fn() + Send + Sync>;
 const SAVE_EVERY: Duration = Duration::from_secs(30);
 const KEEP_NOTICES: usize = 50;
 const SCAN_EVERY: Duration = Duration::from_secs(5);
+/// How often free disk space is checked.
+const DISK_EVERY: Duration = Duration::from_secs(10);
 /// How often each feed is read, in seconds.
 const FEED_EVERY: u64 = 15 * 60;
 const FEED_MAX_BYTES: usize = 8 * 1024 * 1024;
@@ -275,6 +293,7 @@ struct Worker {
     dirty: bool,
     last_save: Instant,
     last_scan: Option<Instant>,
+    last_disk_check: Option<Instant>,
     /// Files in the watch folder that could not be handled, so they are reported once.
     watch_failed: HashSet<PathBuf>,
     /// For reading feeds. Tied to the same interface as the session.
@@ -313,6 +332,8 @@ struct Worker {
     /// Finished torrents whose finish notice waits until their data is moved out of the
     /// folder for unfinished downloads.
     announce: HashSet<String>,
+    /// Plays files while they download. Started the first time one is played.
+    streams: Option<crate::stream::Streams>,
 }
 
 mod make;
@@ -386,6 +407,7 @@ async fn main_loop(
         dirty: false,
         last_save: Instant::now(),
         last_scan: None,
+        last_disk_check: None,
         watch_failed: HashSet::new(),
         http: None,
         feed_tx,
@@ -408,6 +430,7 @@ async fn main_loop(
         remote_fingerprint: None,
         moves: HashMap::new(),
         announce: HashSet::new(),
+        streams: None,
     };
     if let Some(note) = note {
         w.notice(note, true);
@@ -480,6 +503,45 @@ impl Worker {
             let extra = notices.len() - KEEP_NOTICES;
             notices.drain(..extra);
         }
+    }
+
+    /// Gives one file of a torrent an address a player can open while it downloads.
+    async fn play(&mut self, key: &str, file: usize) {
+        let Some(handle) = self.find(key) else {
+            return self.notice("That torrent cannot be played: it is not running.", true);
+        };
+        let name = handle.name().unwrap_or_else(|| key.to_owned());
+        let Some(meta) = self.meta.get(key).and_then(|m| m.files.get(file).cloned()) else {
+            return self.notice(format!("The file list of {name} has not arrived yet."), true);
+        };
+        let finished = handle
+            .stats()
+            .file_progress
+            .get(file)
+            .is_some_and(|&done| done >= meta.len);
+        if handle.is_paused() && !finished {
+            // A paused torrent has no peers, so the player would wait for ever.
+            return self.notice(
+                format!("Resume {name} to play {} before it has finished.", meta.name),
+                true,
+            );
+        }
+        if self.streams.is_none() {
+            match crate::stream::Streams::start().await {
+                Ok(streams) => self.streams = Some(streams),
+                Err(e) => return self.notice(format!("Could not start playing: {e}"), true),
+            }
+        }
+        let open: crate::stream::Open = Arc::new(move || {
+            let handle = handle.clone();
+            Box::pin(async move {
+                let stream = handle.stream(file).await?;
+                let len = stream.len();
+                Ok((Box::new(stream) as Box<dyn crate::stream::Reader>, len))
+            })
+        });
+        let streams = self.streams.as_ref().expect("started above");
+        streams.add(key, file, &meta.name, open);
     }
 
     fn save(&mut self) {
@@ -569,23 +631,28 @@ impl Worker {
         let (id, text, label) = (p.id, p.text.clone(), p.label.clone());
         Some(tokio::spawn(async move {
             let result = async {
-                // A torrent file is read first, so its files can be looked for below.
+                // The torrent's details are got first, so its files can go in a folder
+                // of its own name and be looked for below. The engine fetches a magnet
+                // link's details before adding it anyway.
                 let prepared = match (prepared, &source) {
-                    (None, Source::File(path)) => Some(Prepared {
+                    (Some(prepared), _) => prepared,
+                    (None, Source::File(path)) => Prepared {
                         bytes: read_file(path.clone()).await?,
                         trackers: Vec::new(),
                         peers: Vec::new(),
-                    }),
-                    (prepared, _) => prepared,
+                    },
+                    (None, Source::Link(_)) => manage::inspect(&session, &text).await?.2,
                 };
-                let names = prepared.as_ref().and_then(|p| manage::torrent_files(&p.bytes));
+                let bytes = prepared.bytes.clone();
                 let (start, final_dir) = tokio::task::spawn_blocking(move || {
-                    manage::start_folder(incomplete.as_deref(), &folder, names.as_deref())
+                    let names = manage::torrent_files(&bytes);
+                    let own = |d: &Path| manage::data_folder(&bytes, d);
+                    manage::start_folder(incomplete.as_deref(), &folder, names.as_deref(), own)
                 })
                 .await
                 .map_err(|e| e.to_string())?;
                 let options = manage::engine_options(&start, paused, files);
-                let added = add_to_engine(&session, source, options, prepared).await?;
+                let added = add_to_engine(&session, source, options, Some(prepared)).await?;
                 Ok::<_, String>((added, final_dir))
             }
             .await;
@@ -963,6 +1030,9 @@ impl Worker {
                             self.last_up.remove(&key);
                             self.slow_since.remove(&key);
                             self.meta.remove(&key);
+                            if let Some(streams) = &self.streams {
+                                streams.forget(&key);
+                            }
                             let what = if delete_files {
                                 "Removed and deleted files of"
                             } else {
@@ -1123,8 +1193,8 @@ impl Worker {
                 self.save();
                 self.start_remote().await;
             }
-            Command::SetWatchDir(dir) => {
-                self.store.data.settings.watch_dir = dir;
+            Command::SetWatchDirs(folders) => {
+                self.store.data.settings.watch_dirs = folders;
                 self.watch_failed.clear();
                 self.last_scan = None;
                 self.save();
@@ -1177,6 +1247,7 @@ impl Worker {
                     }
                 }
             }
+            Command::Play { key, file } => self.play(&key, file).await,
             Command::Reannounce(keys) => {
                 for key in keys {
                     let Some(handle) = self.find(&key) else { continue };
@@ -1257,6 +1328,11 @@ impl Worker {
                 self.store.data.settings.ask_before_add = on;
                 self.save();
             }
+            Command::SetKeepFree(mib) => {
+                self.store.data.settings.keep_free_mib = mib;
+                self.save();
+            }
+            Command::Import(client, dir) => self.import(client, &dir),
             Command::CreateTorrent(opts) => self.start_make(opts),
             Command::CancelCreate => self.cancel_make(),
             Command::SaveTorrentFile { key, path } => self.save_torrent_file(&key, path),
@@ -1320,7 +1396,11 @@ impl Worker {
                 item,
                 category,
             } => self.add_feed_item(feed_url, item, category),
-            Command::AddTorrentBytes(bytes) => self.add_upload(bytes),
+            Command::AddTorrentBytes {
+                bytes,
+                category,
+                paused,
+            } => self.add_upload(bytes, category, paused),
             Command::SetRemoteHttps(on) => {
                 self.store.data.settings.remote.https = on;
                 self.save();
@@ -1343,13 +1423,17 @@ impl Worker {
         (self.comfort).add_finished(key.to_owned(), name, folder.to_string_lossy().into_owned());
     }
 
-    /// Adds the `.torrent` files found in the watch folder. Each one is renamed first, so
-    /// it is picked up once only and the folder shows what has been taken.
-    fn scan_watch_dir(&mut self) {
-        let Some(dir) = self.store.data.settings.watch_dir.clone() else {
-            return;
-        };
-        let Ok(entries) = std::fs::read_dir(&dir) else { return };
+    /// Adds the `.torrent` files found in the watch folders, each with its folder's
+    /// category. Each one is renamed first, so it is picked up once only and the folder
+    /// shows what has been taken.
+    fn scan_watch_dirs(&mut self) {
+        for folder in self.store.data.settings.watch_dirs.clone() {
+            self.scan_watch_dir(&folder.dir, folder.category);
+        }
+    }
+
+    fn scan_watch_dir(&mut self, dir: &Path, category: Option<String>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
         let mut found: Vec<PathBuf> = entries
             .flatten()
             .map(|e| e.path())
@@ -1368,7 +1452,7 @@ impl Worker {
             taken.push(".added");
             let taken = PathBuf::from(taken);
             match std::fs::rename(&path, &taken) {
-                Ok(()) => self.add(taken.to_string_lossy().into_owned(), None),
+                Ok(()) => self.add(taken.to_string_lossy().into_owned(), category.clone()),
                 Err(e) => {
                     self.notice(
                         format!("Could not take {} from the watch folder: {e}", path.display()),
@@ -1378,6 +1462,42 @@ impl Worker {
                 }
             }
         }
+    }
+
+    /// Adds every torrent another app has, at the folder where that app keeps its data,
+    /// with its category and paused or not. The engine checks the data before going on.
+    fn import(&mut self, client: Client, dir: &Path) {
+        let scan = match import::scan(client, dir) {
+            Ok(scan) => scan,
+            Err(e) => return self.notice(format!("Could not import from {}: {e}", client.name()), true),
+        };
+        let mut added = 0;
+        for found in scan.found {
+            // The files go in a folder of the torrent's own name there, or straight in
+            // it if the other app saved them so; see `manage::data_folder`.
+            self.add_with(AddOptions {
+                text: found.torrent.to_string_lossy().into_owned(),
+                folder: found.save_path,
+                category: found.category,
+                paused: found.paused,
+                files: None,
+            });
+            added += 1;
+        }
+        let mut text = match added {
+            0 => format!("{} has no torrents to import.", client.name()),
+            n => format!(
+                "Importing from {}: {n} found. Each one's data is checked first.",
+                client.name()
+            ),
+        };
+        if scan.skipped > 0 {
+            text.push_str(&format!(
+                " Left out, known only by a magnet link: {}. Add their links by hand.",
+                scan.skipped
+            ));
+        }
+        self.notice(text, false);
     }
 
     /// Starts reading every feed whose turn has come.
@@ -1557,10 +1677,53 @@ impl Worker {
         (m.files.clone(), m.trackers.clone())
     }
 
+    /// Pauses each download whose disk has less free space than the user keeps free, so
+    /// the disk does not fill up. They are not resumed by themselves.
+    fn guard_disk(&mut self, rows: &[(Handle, String, librqbit::TorrentStats)]) {
+        let keep = self.store.data.settings.keep_free_mib;
+        if keep == 0 || self.last_disk_check.is_some_and(|t| t.elapsed() < DISK_EVERY) {
+            return;
+        }
+        self.last_disk_check = Some(Instant::now());
+        let mut free_at: HashMap<PathBuf, Option<u64>> = HashMap::new();
+        for (handle, key, stats) in rows {
+            let downloading = matches!(stats.state, TorrentStatsState::Live) && !stats.finished;
+            if !downloading
+                || self
+                    .store
+                    .data
+                    .torrents
+                    .get(key)
+                    .is_none_or(|r| r.intent != Intent::Run)
+            {
+                continue;
+            }
+            let folder = handle.output_folder().to_path_buf();
+            let free = *free_at
+                .entry(folder.clone())
+                .or_insert_with(|| crate::disk::free_bytes(&folder));
+            let Some(free) = free.filter(|&f| crate::disk::too_full(f, keep)) else {
+                continue;
+            };
+            if let Some(record) = self.store.data.torrents.get_mut(key) {
+                record.intent = Intent::Pause;
+            }
+            self.dirty = true;
+            let name = handle.name().unwrap_or_else(|| key.clone());
+            self.notice(
+                format!(
+                    "Paused {name}: only {} is free on its disk. Make room, then resume it.",
+                    crate::format::bytes(free)
+                ),
+                true,
+            );
+        }
+    }
+
     async fn tick(&mut self) {
         if self.last_scan.is_none_or(|t| t.elapsed() >= SCAN_EVERY) {
             self.last_scan = Some(Instant::now());
-            self.scan_watch_dir();
+            self.scan_watch_dirs();
         }
         self.ensure_session().await;
         self.poll_feeds();
@@ -1647,6 +1810,7 @@ impl Worker {
                 }
                 rows.push((handle, key, stats));
             }
+            self.guard_disk(&rows);
             let items: Vec<rules::Item> = rows.iter().map(|(_, key, stats)| self.item(key, stats)).collect();
             let outcomes = rules::apply(&items, &self.store.data.settings, clock);
 
@@ -1814,7 +1978,7 @@ impl Worker {
             Arc::make_mut(&mut self.comfort.speeds).push(now_secs(), down_total, up_total);
         }
         self.share_settings_and_feeds();
-        let quit_now = (self.comfort).should_quit(self.store.data.settings.comfort.when_all_done, &torrents);
+        (self.comfort).check_all_done(self.store.data.settings.comfort.when_all_done, &torrents);
         let snapshot = Snapshot {
             ready: true,
             fatal: None,
@@ -1841,10 +2005,11 @@ impl Worker {
             },
             running_since: self.comfort.running().1,
             finished: self.comfort.finished.clone(),
-            quit_now,
+            all_done: self.comfort.all_done,
             pieces,
             feed_preview: self.preview.clone(),
             remote_fingerprint: self.remote_fingerprint.clone(),
+            streams: self.streams.as_ref().map(|s| s.views()).unwrap_or_default(),
         };
         let mut current = self.shared.lock().unwrap_or_else(|e| e.into_inner());
         if **current != snapshot {
@@ -2015,11 +2180,17 @@ async fn add_to_engine(
         (None, Source::Link(url)) => AddTorrent::from_url(url),
         (None, Source::File(path)) => AddTorrent::from_bytes(read_file(path).await?),
     };
-    let (handle, already) = match session
-        .add_torrent(add, Some(options))
-        .await
-        .map_err(|e| format!("{e:#}"))?
-    {
+    // One add at a time. librqbit picks a new torrent's id as the highest
+    // saved id + 1, and saves it only near the end of the add. Two adds at
+    // once get the same id, and the engine then calls the second one "already
+    // in the list" and hands back the first. Every caller here adds from
+    // bytes (magnets are looked up before this), so the wait is short.
+    static ONE_ADD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let added = {
+        let _one = ONE_ADD.lock().await;
+        session.add_torrent(add, Some(options)).await
+    };
+    let (handle, already) = match added.map_err(|e| format!("{e:#}"))? {
         AddTorrentResponse::Added(_, h) => (h, false),
         AddTorrentResponse::AlreadyManaged(_, h) => (h, true),
         AddTorrentResponse::ListOnly(_) => return Err("the engine only listed the torrent".into()),

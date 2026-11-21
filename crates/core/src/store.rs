@@ -24,6 +24,8 @@ pub struct Settings {
     /// Unfinished downloads are kept here, and each is moved to its own folder once it
     /// finishes. `None` downloads straight into that folder.
     pub incomplete_dir: Option<PathBuf>,
+    /// Pause a download when less than this many MiB is free on its disk. 0 is off.
+    pub keep_free_mib: u64,
     /// Download limit in KiB/s. 0 means no limit.
     pub down_limit_kib: u32,
     /// Upload limit in KiB/s. 0 means no limit.
@@ -33,7 +35,11 @@ pub struct Settings {
     /// Stop seeding at this ratio, in percent (150 is a ratio of 1.5). 0 means no limit.
     pub ratio_limit_pct: u32,
     pub schedule: Schedule,
-    /// `.torrent` files put in this folder are added by themselves.
+    /// `.torrent` files put in these folders are added by themselves.
+    pub watch_dirs: Vec<WatchFolder>,
+    /// The single watch folder of versions before 0.14. Read once, moved into
+    /// `watch_dirs` on load, never written.
+    #[serde(skip_serializing)]
     pub watch_dir: Option<PathBuf>,
     /// Send and receive everything through this network interface alone, and nothing at
     /// all while it is not connected. `None` uses whatever connection the system has.
@@ -110,11 +116,13 @@ impl Default for Settings {
         Self {
             download_dir,
             incomplete_dir: None,
+            keep_free_mib: 1024,
             down_limit_kib: 0,
             up_limit_kib: 0,
             max_downloads: 0,
             ratio_limit_pct: 0,
             schedule: Schedule::default(),
+            watch_dirs: Vec::new(),
             watch_dir: None,
             bind_interface: None,
             remote: RemoteSettings::default(),
@@ -127,6 +135,14 @@ impl Default for Settings {
             recent_dirs: Vec::new(),
         }
     }
+}
+
+/// A folder whose `.torrent` files are added by themselves, with the category they get.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+#[serde(default)]
+pub struct WatchFolder {
+    pub dir: PathBuf,
+    pub category: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
@@ -247,13 +263,21 @@ impl Store {
                 data.schema_version,
                 SCHEMA_VERSION
             ),
-            Ok(data) => Ok((
-                Self {
-                    path: path.to_owned(),
-                    data,
-                },
-                None,
-            )),
+            Ok(mut data) => {
+                // Versions before 0.14 had one watch folder.
+                if let Some(dir) = data.settings.watch_dir.take() {
+                    if data.settings.watch_dirs.is_empty() {
+                        data.settings.watch_dirs.push(WatchFolder { dir, category: None });
+                    }
+                }
+                Ok((
+                    Self {
+                        path: path.to_owned(),
+                        data,
+                    },
+                    None,
+                ))
+            }
             Err(e) => {
                 let aside = path.with_extension(format!("unreadable-{}.json", crate::now_secs()));
                 std::fs::rename(path, &aside).with_context(|| format!("moving unreadable {} aside", path.display()))?;
@@ -319,7 +343,10 @@ mod tests {
         store.data.settings.max_downloads = 2;
         store.data.settings.schedule.enabled = true;
         store.data.pending.push("magnet:?xt=urn:btih:abc".into());
-        store.data.settings.watch_dir = Some(PathBuf::from("/tmp/watch"));
+        store.data.settings.watch_dirs.push(WatchFolder {
+            dir: PathBuf::from("/tmp/watch"),
+            category: Some("Linux".into()),
+        });
         store.data.settings.incomplete_dir = Some(PathBuf::from("/tmp/unfinished"));
         store.data.settings.bind_interface = Some("utun4".into());
         store.data.settings.ask_before_add = false;
@@ -418,5 +445,24 @@ mod tests {
         assert!(note.is_none());
         assert_eq!(store.data.torrents["aa"], Record::default());
         assert!(store.data.settings.ask_before_add, "files from before 0.7 still ask");
+    }
+
+    #[test]
+    fn old_watch_folder_moves_into_the_list() {
+        let path = temp("watch");
+        std::fs::write(&path, r#"{"schema_version":1,"settings":{"watch_dir":"/tmp/w"}}"#).unwrap();
+        let (store, _) = Store::load(&path).unwrap();
+        let folders = &store.data.settings.watch_dirs;
+        assert_eq!(
+            folders,
+            &[WatchFolder {
+                dir: PathBuf::from("/tmp/w"),
+                category: None
+            }]
+        );
+        assert_eq!(store.data.settings.watch_dir, None);
+        store.save().unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("\"watch_dir\""), "the old field is not written again");
     }
 }

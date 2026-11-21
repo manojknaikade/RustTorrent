@@ -4,8 +4,9 @@ use std::sync::Arc;
 
 use eframe::egui::{self, Color32, RichText, Sense};
 use egui_extras::{Column, TableBuilder};
+use rusttorrent_core::store::WatchFolder;
 use rusttorrent_core::{
-    format, manage, Command, Core, Feed, HoldReason, Move, Priority, Schedule, Snapshot, State, TorrentView,
+    format, import, manage, Command, Core, Feed, HoldReason, Move, Priority, Schedule, Snapshot, State, TorrentView,
 };
 
 mod limits;
@@ -103,8 +104,8 @@ struct SettingsDialog {
     /// The ratio itself (1.5), not the percent the core stores.
     ratio: f32,
     schedule: Schedule,
-    watch_on: bool,
-    watch_dir: Option<std::path::PathBuf>,
+    /// Watch folders, each with its category ("" for none).
+    watch_dirs: Vec<(std::path::PathBuf, String)>,
     /// The one network interface to use, or `None` for any.
     interface: Option<String>,
     remote_on: bool,
@@ -116,6 +117,8 @@ struct SettingsDialog {
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     magnet_handler: Option<String>,
     ask_before_add: bool,
+    /// Pause downloads when less than this many MiB is free. 0 is off.
+    keep_free_mib: u64,
     network: crate::network::Form,
     comfort: rusttorrent_core::ComfortSettings,
     remote_https: bool,
@@ -175,8 +178,9 @@ impl SettingsDialog {
                 1.0
             },
             schedule: s.schedule,
-            watch_on: s.watch_dir.is_some(),
-            watch_dir: s.watch_dir.clone(),
+            watch_dirs: (s.watch_dirs.iter())
+                .map(|w| (w.dir.clone(), w.category.clone().unwrap_or_default()))
+                .collect(),
             interface: s.bind_interface.clone(),
             remote_on: s.remote.enabled,
             remote_port: s.remote.port,
@@ -187,6 +191,7 @@ impl SettingsDialog {
             #[cfg(not(target_os = "macos"))]
             magnet_handler: None,
             ask_before_add: s.ask_before_add,
+            keep_free_mib: s.keep_free_mib,
             network: crate::network::Form::of(&s.network),
             comfort: s.comfort.clone(),
             remote_https: s.remote.https,
@@ -262,6 +267,9 @@ pub struct App {
     extras: crate::comfort::Extras,
     /// Sidebar counts, worked out in `rebuild()` instead of every frame.
     side: Side,
+    /// A file waiting for its stream address: torrent, file, copy instead of play, and
+    /// when it was asked for.
+    play: Option<(String, usize, bool, std::time::Instant)>,
 }
 
 /// What the sidebar shows next to each status, category and tag.
@@ -323,6 +331,26 @@ fn secs_left(t: &TorrentView) -> u64 {
         u64::MAX
     } else {
         (t.total - t.done) / t.down_bps
+    }
+}
+
+/// Opens a stream address in VLC when it is installed, or else in the default browser.
+fn open_player(url: &str) {
+    use std::process::Command as Run;
+    let vlc = if cfg!(target_os = "macos") {
+        std::path::Path::new("/Applications/VLC.app")
+            .exists()
+            .then(|| Run::new("open").args(["-a", "VLC", url]).spawn())
+    } else if cfg!(windows) {
+        let path = r"C:\Program Files\VideoLAN\VLC\vlc.exe";
+        std::path::Path::new(path)
+            .exists()
+            .then(|| Run::new(path).arg(url).spawn())
+    } else {
+        Some(Run::new("vlc").arg(url).spawn())
+    };
+    if !matches!(vlc, Some(Ok(_))) {
+        reveal(url);
     }
 }
 
@@ -388,6 +416,7 @@ impl App {
             create: None,
             extras: Default::default(),
             side: Side::default(),
+            play: None,
         }
     }
 
@@ -912,6 +941,7 @@ impl App {
         let is_on = |i: usize| t.selected.as_ref().is_none_or(|s| s.contains(&i));
         let mut change: Option<Vec<usize>> = None;
         let mut priority: Option<(usize, Priority)> = None;
+        let mut play: Option<(usize, bool)> = None;
         ui.horizontal(|ui| {
             let chosen = t.selected.as_ref().map_or(n, |s| s.len());
             ui.label(RichText::new(format!("{chosen} of {n} files chosen for download")).weak());
@@ -961,10 +991,38 @@ impl App {
                             [70.0, 18.0],
                             egui::Label::new(RichText::new(format::bytes(f.len)).weak()),
                         );
+                        if ui
+                            .small_button("Play")
+                            .on_hover_text("Open in VLC, or else the browser, while it downloads")
+                            .clicked()
+                        {
+                            play = Some((i, false));
+                        }
+                        if ui
+                            .small_button("Copy link")
+                            .on_hover_text("Copy an address any player on this computer can open")
+                            .clicked()
+                        {
+                            play = Some((i, true));
+                        }
                         ui.add(egui::Label::new(&f.name).truncate());
                     });
                 }
             });
+        if let Some((file, copy)) = play {
+            let ready = self.snap.streams.iter().find(|s| s.key == t.key && s.file == file);
+            match ready {
+                Some(link) if copy => ui.ctx().copy_text(link.url.clone()),
+                Some(link) => open_player(&link.url),
+                None => {
+                    self.core.send(Command::Play {
+                        key: t.key.clone(),
+                        file,
+                    });
+                    self.play = Some((t.key.clone(), file, copy, std::time::Instant::now()));
+                }
+            }
+        }
         if let Some((file, priority)) = priority {
             self.core.send(Command::SetFilePriority {
                 key: t.key.clone(),
@@ -1589,6 +1647,22 @@ impl App {
                     "Ask where to save and which files to download when adding",
                 )
                 .on_hover_text("Torrents from the watch folder, feeds and the remote page are added without asking.");
+                ui.horizontal(|ui| {
+                    let mut on = dialog.keep_free_mib > 0;
+                    if ui
+                        .checkbox(&mut on, "Pause downloads when the disk has less than")
+                        .on_hover_text("Checked every 10 seconds. Resume them by hand once there is room.")
+                        .changed()
+                    {
+                        dialog.keep_free_mib = if on { 1024 } else { 0 };
+                    }
+                    let mut gib = dialog.keep_free_mib as f64 / 1024.0;
+                    let drag = egui::DragValue::new(&mut gib).range(0.1..=1000.0).speed(0.1).suffix(" GB").max_decimals(1);
+                    if ui.add_enabled(on, drag).changed() {
+                        dialog.keep_free_mib = ((gib * 1024.0).round() as u64).max(1);
+                    }
+                    ui.label("free");
+                });
                 egui::CollapsingHeader::new("Folder per category")
                     .id_salt("category-dirs")
                     .show(ui, |ui| {
@@ -1709,25 +1783,59 @@ impl App {
                     });
                 });
                 ui.add_space(8.0);
-                ui.checkbox(&mut dialog.watch_on, "Add .torrent files put in a folder");
-                ui.add_enabled_ui(dialog.watch_on, |ui| {
+                ui.label(RichText::new("Add .torrent files put in these folders").weak());
+                let mut gone = None;
+                for (i, (dir, category)) in dialog.watch_dirs.iter_mut().enumerate() {
                     ui.horizontal(|ui| {
-                        if ui.button("Choose…").clicked() {
-                            if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-                                dialog.watch_dir = Some(dir);
+                        if ui.small_button("✕").on_hover_text("Stop watching this folder").clicked() {
+                            gone = Some(i);
+                        }
+                        ui.add(
+                            egui::TextEdit::singleline(category)
+                                .hint_text("no category")
+                                .desired_width(90.0),
+                        )
+                        .on_hover_text("The category the torrents from this folder get");
+                        ui.add(egui::Label::new(dir.display().to_string()).truncate());
+                    });
+                }
+                if let Some(i) = gone {
+                    dialog.watch_dirs.remove(i);
+                }
+                ui.horizontal(|ui| {
+                    if ui.button("Add folder…").clicked() {
+                        if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                            if !dialog.watch_dirs.iter().any(|(d, _)| *d == dir) {
+                                dialog.watch_dirs.push((dir, String::new()));
                             }
                         }
-                        let text = match &dialog.watch_dir {
-                            Some(dir) => RichText::new(dir.display().to_string()),
-                            None => RichText::new("No folder chosen").weak(),
-                        };
-                        ui.add(egui::Label::new(text).truncate());
-                    });
+                    }
                     ui.label(
                         RichText::new("A file that has been added is renamed to end in “.added”.")
                             .small()
                             .weak(),
                     );
+                });
+                ui.add_space(8.0);
+                ui.label(RichText::new("Take over the torrents of another app").weak()).on_hover_text(
+                    "Quit the other app first. Its data stays where it is and is checked before \
+                     RustTorrent goes on. Its own list is not changed.",
+                );
+                ui.horizontal(|ui| {
+                    for client in [import::Client::Transmission, import::Client::QBittorrent] {
+                        if ui.button(format!("Import from {}…", client.name())).clicked() {
+                            let mut pick = rfd::FileDialog::new().set_title(match client {
+                                import::Client::Transmission => "Choose Transmission's folder",
+                                import::Client::QBittorrent => "Choose qBittorrent's BT_backup folder",
+                            });
+                            if let Some(dir) = client.default_dir().filter(|d| d.is_dir()) {
+                                pick = pick.set_directory(dir);
+                            }
+                            if let Some(dir) = pick.pick_folder() {
+                                core.send(Command::Import(client, dir));
+                            }
+                        }
+                    }
                 });
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
@@ -1905,9 +2013,14 @@ impl App {
                     },
                     schedule: dialog.schedule,
                 });
-                let watch = dialog.watch_dir.clone().filter(|_| dialog.watch_on);
-                if watch != snap.settings.watch_dir {
-                    core.send(Command::SetWatchDir(watch));
+                let watch: Vec<WatchFolder> = (dialog.watch_dirs.iter())
+                    .map(|(dir, category)| WatchFolder {
+                        dir: dir.clone(),
+                        category: Some(category.trim().to_owned()).filter(|c| !c.is_empty()),
+                    })
+                    .collect();
+                if watch != snap.settings.watch_dirs {
+                    core.send(Command::SetWatchDirs(watch));
                 }
                 if dialog.interface != snap.settings.bind_interface {
                     core.send(Command::SetInterface(dialog.interface.clone()));
@@ -1927,6 +2040,9 @@ impl App {
                 }
                 if dialog.ask_before_add != snap.settings.ask_before_add {
                     core.send(Command::SetAskBeforeAdd(dialog.ask_before_add));
+                }
+                if dialog.keep_free_mib != snap.settings.keep_free_mib {
+                    core.send(Command::SetKeepFree(dialog.keep_free_mib));
                 }
                 crate::network::save(core, &dialog.network, snap);
                 if dialog.comfort != snap.settings.comfort {
@@ -2265,6 +2381,20 @@ impl App {
         if !Arc::ptr_eq(&snap, &self.snap) {
             self.snap = snap;
             self.dirty = true;
+        }
+        if let Some((key, file, copy, at)) = &self.play {
+            let link = self.snap.streams.iter().find(|s| &s.key == key && s.file == *file);
+            if let Some(link) = link {
+                if *copy {
+                    ctx.copy_text(link.url.clone());
+                } else {
+                    open_player(&link.url);
+                }
+                self.play = None;
+            } else if at.elapsed() > std::time::Duration::from_secs(10) {
+                // The engine said why in a notice.
+                self.play = None;
+            }
         }
 
         // Wait for the saved settings, which say whether to ask before adding.
