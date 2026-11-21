@@ -59,6 +59,9 @@ pub enum Command {
         up_kib: u32,
     },
     SetDownloadDir(PathBuf),
+    /// The folder unfinished downloads are kept in. `None` downloads straight into each
+    /// torrent's own folder.
+    SetIncompleteDir(Option<PathBuf>),
     /// How many torrents download at once, the ratio limit in percent and the schedule.
     /// 0 means no limit.
     SetRules {
@@ -233,6 +236,9 @@ struct AddDone {
     label: String,
     /// The info-hash and name, and whether the torrent was already in the list.
     result: Result<(String, String, bool), String>,
+    /// Where its data goes once it finishes, when it starts in the folder for
+    /// unfinished downloads.
+    final_dir: Option<PathBuf>,
 }
 
 struct Meta {
@@ -304,6 +310,9 @@ struct Worker {
     remote_fingerprint: Option<String>,
     /// Data moves running in the background, by key.
     moves: HashMap<String, moving::MoveTask>,
+    /// Finished torrents whose finish notice waits until their data is moved out of the
+    /// folder for unfinished downloads.
+    announce: HashSet<String>,
 }
 
 mod make;
@@ -398,6 +407,7 @@ async fn main_loop(
         preview: None,
         remote_fingerprint: None,
         moves: HashMap::new(),
+        announce: HashSet::new(),
     };
     if let Some(note) = note {
         w.notice(note, true);
@@ -552,16 +562,43 @@ impl Worker {
         let session = self.session.clone()?;
         let source = intake::parse(&p.text).ok()?;
         let tx = self.add_tx.clone();
-        let folder = manage::folder_for(&self.store.data.settings, p.folder.as_ref(), p.category.as_deref());
-        let options = manage::engine_options(&folder, p.paused, p.files.clone());
+        let settings = &self.store.data.settings;
+        let folder = manage::folder_for(settings, p.folder.as_ref(), p.category.as_deref());
+        let incomplete = settings.incomplete_dir.clone();
+        let (paused, files) = (p.paused, p.files.clone());
         let (id, text, label) = (p.id, p.text.clone(), p.label.clone());
         Some(tokio::spawn(async move {
-            let result = add_to_engine(&session, source, options, prepared).await;
+            let result = async {
+                // A torrent file is read first, so its files can be looked for below.
+                let prepared = match (prepared, &source) {
+                    (None, Source::File(path)) => Some(Prepared {
+                        bytes: read_file(path.clone()).await?,
+                        trackers: Vec::new(),
+                        peers: Vec::new(),
+                    }),
+                    (prepared, _) => prepared,
+                };
+                let names = prepared.as_ref().and_then(|p| manage::torrent_files(&p.bytes));
+                let (start, final_dir) = tokio::task::spawn_blocking(move || {
+                    manage::start_folder(incomplete.as_deref(), &folder, names.as_deref())
+                })
+                .await
+                .map_err(|e| e.to_string())?;
+                let options = manage::engine_options(&start, paused, files);
+                let added = add_to_engine(&session, source, options, prepared).await?;
+                Ok::<_, String>((added, final_dir))
+            }
+            .await;
+            let (result, final_dir) = match result {
+                Ok((added, final_dir)) => (Ok(added), final_dir),
+                Err(e) => (Err(e), None),
+            };
             let _ = tx.send(AddDone {
                 id,
                 text,
                 label,
                 result,
+                final_dir,
             });
         }))
     }
@@ -778,6 +815,7 @@ impl Worker {
                         added_at: now_secs(),
                         queue_pos,
                         category,
+                        final_dir: done.final_dir,
                         ..Default::default()
                     },
                 );
@@ -965,6 +1003,13 @@ impl Worker {
                 self.store.data.settings.download_dir = dir;
                 self.save();
             }
+            Command::SetIncompleteDir(dir) => {
+                if let Some(dir) = &dir {
+                    self.store.data.settings.remember_dir(dir);
+                }
+                self.store.data.settings.incomplete_dir = dir;
+                self.save();
+            }
             Command::SetRules {
                 max_downloads,
                 ratio_limit_pct,
@@ -1012,7 +1057,17 @@ impl Worker {
                 // moves when they join it. Torrents already in that folder stay put.
                 let dir = category.and_then(|c| self.store.data.settings.category_dirs.get(&c).cloned());
                 if let Some(dir) = dir {
-                    self.move_data(keys, dir).await;
+                    // A torrent still in the folder for unfinished downloads goes to the
+                    // category's folder when it finishes, not now.
+                    let mut now = Vec::new();
+                    for key in keys {
+                        match self.store.data.torrents.get_mut(&key) {
+                            Some(r) if r.final_dir.is_some() && !r.finished => r.final_dir = Some(dir.clone()),
+                            _ => now.push(key),
+                        }
+                    }
+                    self.save();
+                    self.move_data(now, dir).await;
                 }
             }
             Command::SetTag { keys, tag, on } => {
@@ -1529,6 +1584,7 @@ impl Worker {
         let seed_secs = self.seed_clock.elapsed().as_secs();
         self.seed_clock += Duration::from_secs(seed_secs);
 
+        self.start_final_moves().await;
         self.move_tick().await;
         if let Some(session) = self.session.clone() {
             // First look at every torrent, then let the rules see them all together.
@@ -1576,7 +1632,18 @@ impl Worker {
                     self.dirty = true;
                 }
                 if self.comfort.check_finish(&key, live, stats.finished) {
-                    self.finished(&key, &handle);
+                    if self
+                        .store
+                        .data
+                        .torrents
+                        .get(&key)
+                        .is_some_and(|r| r.final_dir.is_some())
+                    {
+                        // Given once the data is in its own folder.
+                        self.announce.insert(key.clone());
+                    } else {
+                        self.finished(&key, &handle);
+                    }
                 }
                 rows.push((handle, key, stats));
             }
@@ -1608,7 +1675,9 @@ impl Worker {
                     self.dirty = true;
                 }
 
+                let moving_next = stats.finished && self.store.data.torrents[&key].final_dir.is_some();
                 let state = match stats.state {
+                    _ if moving_next => State::Moving,
                     TorrentStatsState::Initializing { .. } => State::Checking,
                     TorrentStatsState::Live if stats.finished => State::Seeding,
                     TorrentStatsState::Live => State::Downloading,
@@ -1927,6 +1996,14 @@ async fn fetch_feed(http: &reqwest::Client, url: &str) -> Result<String, String>
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
+async fn read_file(path: PathBuf) -> Result<Vec<u8>, String> {
+    tokio::task::spawn_blocking(move || {
+        std::fs::read(&path).map_err(|e| format!("could not read {}: {e}", path.display()))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 async fn add_to_engine(
     session: &Arc<Session>,
     source: Source,
@@ -1936,14 +2013,7 @@ async fn add_to_engine(
     let add = match (prepared, source) {
         (Some(prepared), _) => prepared.into_add(&mut options),
         (None, Source::Link(url)) => AddTorrent::from_url(url),
-        (None, Source::File(path)) => {
-            let bytes = tokio::task::spawn_blocking(move || {
-                std::fs::read(&path).map_err(|e| format!("could not read {}: {e}", path.display()))
-            })
-            .await
-            .map_err(|e| e.to_string())??;
-            AddTorrent::from_bytes(bytes)
-        }
+        (None, Source::File(path)) => AddTorrent::from_bytes(read_file(path).await?),
     };
     let (handle, already) = match session
         .add_torrent(add, Some(options))

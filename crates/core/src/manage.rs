@@ -7,7 +7,7 @@
 //! fetched are kept, so adding afterwards does not have to fetch them a second time.
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use librqbit::{AddTorrent, AddTorrentOptions, AddTorrentResponse, Magnet, Session};
@@ -48,6 +48,35 @@ pub fn folder_for(settings: &Settings, chosen: Option<&PathBuf>, category: Optio
         .cloned()
         .or_else(|| category.and_then(|c| settings.category_dirs.get(c).cloned()))
         .unwrap_or_else(|| settings.download_dir.clone())
+}
+
+/// Where a new torrent is added, and the folder it moves to once it finishes (`None`
+/// when it stays). With a folder for unfinished downloads it starts there, unless that
+/// is already its own folder, or some of its files are in its own folder already: then
+/// it uses the data that is there instead of downloading it again. `files` is `None`
+/// when they are not known yet, as for a magnet link added without the add dialog.
+pub(crate) fn start_folder(
+    incomplete: Option<&Path>,
+    folder: &Path,
+    files: Option<&[PathBuf]>,
+) -> (PathBuf, Option<PathBuf>) {
+    let Some(incomplete) = incomplete.filter(|d| *d != folder) else {
+        return (folder.to_path_buf(), None);
+    };
+    if files.is_some_and(|files| files.iter().any(|f| folder.join(f).exists())) {
+        return (folder.to_path_buf(), None);
+    }
+    (incomplete.to_path_buf(), Some(folder.to_path_buf()))
+}
+
+/// A torrent's files from its bytes, relative to its folder, without padding files.
+pub(crate) fn torrent_files(bytes: &[u8]) -> Option<Vec<PathBuf>> {
+    let info = librqbit::torrent_from_bytes(bytes).ok()?.info.data.validate().ok()?;
+    let files = (info.iter_file_details())
+        .filter(|f| !f.attrs().padding)
+        .map(|f| f.filename.to_pathbuf())
+        .collect();
+    Some(files)
 }
 
 /// A magnet link for a torrent in the list: its info-hash, name and trackers.
@@ -260,6 +289,54 @@ async fn inspect(session: &Arc<Session>, text: &str) -> Result<(String, Vec<File
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("rusttorrent-manage-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn start_folder_choice() {
+        let dir = scratch("start");
+        let (done, unfinished) = (dir.join("done"), dir.join("unfinished"));
+        let files = [PathBuf::from("a.txt"), PathBuf::from("b/c.bin")];
+        // No folder for unfinished downloads, or the same folder: straight in.
+        assert_eq!(start_folder(None, &done, Some(&files)), (done.clone(), None));
+        assert_eq!(start_folder(Some(&done), &done, Some(&files)), (done.clone(), None));
+        // The normal case, and when the files are not known yet.
+        let kept = (unfinished.clone(), Some(done.clone()));
+        assert_eq!(start_folder(Some(&unfinished), &done, Some(&files)), kept);
+        assert_eq!(start_folder(Some(&unfinished), &done, None), kept);
+        // Part of the data is in its own folder already: use it there.
+        std::fs::create_dir_all(done.join("b")).unwrap();
+        std::fs::write(done.join("b/c.bin"), b"part").unwrap();
+        assert_eq!(
+            start_folder(Some(&unfinished), &done, Some(&files)),
+            (done.clone(), None)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn torrent_files_are_relative_to_its_folder() {
+        let dir = scratch("files");
+        let src = dir.join("Folder");
+        std::fs::create_dir_all(src.join("b")).unwrap();
+        std::fs::write(src.join("a.txt"), vec![1u8; 5_000]).unwrap();
+        std::fs::write(src.join("b/c.bin"), vec![2u8; 70_000]).unwrap();
+        let opts = crate::make::MakeOptions {
+            source: src,
+            save_to: dir.join("out.torrent"),
+            ..Default::default()
+        };
+        let bytes = crate::make::make(&opts, &crate::make::Progress::default()).unwrap();
+        let files = torrent_files(&bytes).unwrap();
+        assert_eq!(files, [PathBuf::from("a.txt"), PathBuf::from("b/c.bin")]);
+        assert_eq!(torrent_files(b"not a torrent"), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn folder_choice_order() {

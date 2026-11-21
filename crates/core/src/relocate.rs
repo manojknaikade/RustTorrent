@@ -15,6 +15,10 @@ pub struct MoveNote {
     pub files: Vec<PathBuf>,
     /// The files chosen for download, to choose again when it is added back.
     pub only_files: Option<Vec<usize>>,
+    /// The download finished just before the move: say so, and run the finish program,
+    /// once the data is in its new folder.
+    #[serde(default)]
+    pub announce: bool,
 }
 
 /// Moves each file from `from` to `to`, keeping its place below the folder. Files that

@@ -146,6 +146,7 @@ impl Worker {
                 text,
                 label: name,
                 result,
+                final_dir: None,
             });
         });
     }

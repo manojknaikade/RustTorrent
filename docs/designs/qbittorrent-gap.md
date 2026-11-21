@@ -22,7 +22,7 @@ The tables were first written against 0.6. A row now says which release closed i
 | Add dialog: choose folder, category, files and "start paused" before the download begins | Has it (0.7) |  |
 | Move a torrent's data to another folder | Has it | Takes the torrent out of the engine, moves the files, adds it back |
 | Folder per category | Has it (0.7) |  |
-| Separate folder for unfinished downloads | Missing | |
+| Separate folder for unfinished downloads | Has it | Moved to its own folder when it finishes |
 | Force recheck of downloaded data | Has it | Patched engine |
 | Force reannounce to trackers | Has it | Patched engine |
 | Force start (ignore the queue) | Has it (0.7) |  |
@@ -113,7 +113,7 @@ The six releases planned here were built together and published as one, 0.12.0.
 
 - Menu-bar icon and running with the window closed (0.10).
 - A copy of qBittorrent's API for phone apps and other tools (0.11).
-- A separate folder for unfinished downloads (0.7).
+- A separate folder for unfinished downloads (0.7). Built later, after 0.13.4.
 - Binding the remote-control page to the chosen network interface (0.9).
 - The remote page cannot see or set slow mode, the seeding limits or the queue limits.
 

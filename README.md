@@ -34,6 +34,7 @@ Managing
 - Pause, resume, force start (ignore the queue) and remove (optionally deleting the downloaded files).
 - Choose which files of a torrent to download, and give each file a priority: high, normal or low.
 - Recheck a torrent's data, reannounce it to its trackers, or move its data to another folder (right-click menu). A move takes the torrent out of the engine, moves the files, then adds it back at the new folder, where its data is checked again. A move cut short by quitting finishes on the next start.
+- A folder for unfinished downloads (Settings): torrents download there and are moved to their own folder when they finish. The finish notice and the finish program wait until the move is done. A torrent whose data is already in its own folder starts there.
 - Categories and tags, with filters in the sidebar. Make a category with + in the sidebar or by typing a name in the add dialog; right-click one in the sidebar to set its folder or delete it. A category can have its own download folder: a torrent put in that category is saved there, and its data is moved there if it was already downloading.
 - Copy a torrent's magnet link, info-hash or name. Save its `.torrent` file.
 - Make a `.torrent` from a file or folder: trackers in tiers, piece size, comment, private flag, and start seeding it straight away.
@@ -156,6 +157,7 @@ cargo test --workspace
 - The remote page cannot see or set slow mode, the seeding limits or the queue limits. It was tested in one desktop browser, not on a real phone; uploading a valid `.torrent` file, the Files dialog and HTTPS were checked by automated tests only.
 - Switching in-order download off is missing: the engine cannot do it without a large change.
 - Recheck, reannounce, per-torrent limits and file priorities come from a patched copy of the engine (librqbit), pinned in `Cargo.toml`, until the changes are accepted upstream.
+- With a folder for unfinished downloads, a magnet or web link added without the add dialog always starts in that folder, even when its data is already in its own folder. If the app quits between a finish and the move, the finish notice and program for that torrent are skipped; the move itself still happens.
 - While a torrent's data is being moved it cannot be removed, and its transfers stop until the move ends.
 - A torrent stopped by a seeding time limit stays stopped when resumed, until the limit is raised.
 - The proxy password is kept as plain text in the settings file. The block list is read only when the engine starts. Changing a network setting restarts the engine, which interrupts transfers for a moment.

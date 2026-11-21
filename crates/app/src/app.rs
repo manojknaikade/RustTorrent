@@ -1564,6 +1564,26 @@ impl App {
                     }
                     ui.add(egui::Label::new(snap.settings.download_dir.display().to_string()).truncate());
                 });
+                ui.label(RichText::new("Unfinished downloads are kept in").weak())
+                    .on_hover_text("Each torrent is moved to its own folder once it finishes.");
+                ui.horizontal(|ui| {
+                    let incomplete = snap.settings.incomplete_dir.as_ref();
+                    let start = incomplete.unwrap_or(&snap.settings.download_dir);
+                    if let Some(dir) = crate::folders::button(ui, "Change", &snap.settings.recent_dirs, start) {
+                        core.send(Command::SetIncompleteDir(Some(dir)));
+                    }
+                    match incomplete {
+                        Some(dir) => {
+                            if ui.button("Clear").clicked() {
+                                core.send(Command::SetIncompleteDir(None));
+                            }
+                            ui.add(egui::Label::new(dir.display().to_string()).truncate());
+                        }
+                        None => {
+                            ui.label(RichText::new("The same folder").weak());
+                        }
+                    }
+                });
                 ui.checkbox(
                     &mut dialog.ask_before_add,
                     "Ask where to save and which files to download when adding",

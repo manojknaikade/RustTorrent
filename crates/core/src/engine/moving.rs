@@ -6,7 +6,7 @@
 //! files in the background, then add the torrent back at the new folder from the saved
 //! file. The engine checks the data when it is added back. If the app quits midway, the
 //! note in the record makes the next start finish the move.
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use librqbit::api::TorrentIdOrHash;
@@ -32,69 +32,118 @@ impl Worker {
         }
     }
 
+    /// Moves the data of the torrents with `keys` to `dir`, as asked by the user. A
+    /// torrent kept in the folder for unfinished downloads no longer moves when it
+    /// finishes.
     pub(super) async fn move_data(&mut self, keys: Vec<String>, dir: PathBuf) {
-        let Some(session) = self.session.clone() else {
+        if self.session.is_none() {
             return self.notice("Data cannot be moved while all traffic is blocked.", true);
-        };
+        }
         for key in keys {
-            let Some(handle) = self.find(&key) else { continue };
-            let name = handle.name().unwrap_or_else(|| key.clone());
-            let from = handle.output_folder().to_path_buf();
-            if from == dir {
-                continue;
-            }
-            let Ok((torrent, info, files)) = handle.with_metadata(|m| {
-                let files: Vec<PathBuf> = (m.file_infos.iter())
-                    .filter(|f| !f.attrs.padding)
-                    .map(|f| f.relative_filename.clone())
-                    .collect();
-                (m.torrent_bytes.clone(), m.info_bytes.clone(), files)
-            }) else {
-                self.notice(format!("{name} cannot be moved before its details arrive."), true);
-                continue;
-            };
-            let bytes = if torrent.is_empty() {
-                let mut trackers: Vec<String> = handle.shared().trackers.iter().map(|u| u.to_string()).collect();
-                trackers.sort();
-                crate::make::from_info(&info, &trackers)
-            } else {
-                torrent.to_vec()
-            };
-            let path = self.move_file(&key);
-            let written = path
-                .parent()
-                .map_or(Ok(()), std::fs::create_dir_all)
-                .and_then(|()| std::fs::write(&path, bytes));
-            if let Err(e) = written {
-                self.notice(
-                    format!("Could not move {name}: could not write {}: {e}", path.display()),
-                    true,
-                );
-                continue;
-            }
-            let note = MoveNote {
-                from,
-                to: dir.clone(),
-                files,
-                only_files: handle.only_files(),
-            };
-            let Some(record) = self.store.data.torrents.get_mut(&key) else {
-                continue;
-            };
-            record.moving = Some(note);
-            self.save();
-            if let Err(e) = session.delete(TorrentIdOrHash::Id(handle.id()), false).await {
+            if self.start_move(&key, &dir, false).await {
                 if let Some(record) = self.store.data.torrents.get_mut(&key) {
-                    record.moving = None;
+                    record.final_dir = None;
                 }
-                let _ = std::fs::remove_file(&path);
                 self.save();
-                self.notice(format!("Could not move {name}: {e:#}"), true);
-                continue;
             }
-            self.notice(format!("Moving {name} to {}", dir.display()), false);
         }
         self.move_tick().await;
+    }
+
+    /// Moves the data of finished torrents that were kept in the folder for unfinished
+    /// downloads to their own folder. A torrent whose finish was held back for the move
+    /// gives its finish notice once it is moved.
+    pub(super) async fn start_final_moves(&mut self) {
+        if self.session.is_none() {
+            return;
+        }
+        let keys: Vec<(String, PathBuf)> = (self.store.data.torrents.iter())
+            .filter(|(_, r)| r.finished && r.moving.is_none())
+            .filter_map(|(k, r)| r.final_dir.clone().map(|d| (k.clone(), d)))
+            .collect();
+        for (key, dir) in keys {
+            if self.find(&key).is_none() {
+                continue;
+            }
+            let announce = self.announce.remove(&key);
+            if let Some(record) = self.store.data.torrents.get_mut(&key) {
+                record.final_dir = None;
+            }
+            if !self.start_move(&key, &dir, announce).await {
+                // It stays where it is; the finish is not held back any longer.
+                self.save();
+                if announce {
+                    if let Some(handle) = self.find(&key) {
+                        self.finished(&key, &handle);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Starts moving one torrent's data to `dir`. Returns whether the move started.
+    async fn start_move(&mut self, key: &str, dir: &Path, announce: bool) -> bool {
+        let Some(session) = self.session.clone() else {
+            return false;
+        };
+        let Some(handle) = self.find(key) else { return false };
+        let name = handle.name().unwrap_or_else(|| key.to_owned());
+        let from = handle.output_folder().to_path_buf();
+        if from == dir {
+            return false;
+        }
+        let Ok((torrent, info, files)) = handle.with_metadata(|m| {
+            let files: Vec<PathBuf> = (m.file_infos.iter())
+                .filter(|f| !f.attrs.padding)
+                .map(|f| f.relative_filename.clone())
+                .collect();
+            (m.torrent_bytes.clone(), m.info_bytes.clone(), files)
+        }) else {
+            self.notice(format!("{name} cannot be moved before its details arrive."), true);
+            return false;
+        };
+        let bytes = if torrent.is_empty() {
+            let mut trackers: Vec<String> = handle.shared().trackers.iter().map(|u| u.to_string()).collect();
+            trackers.sort();
+            crate::make::from_info(&info, &trackers)
+        } else {
+            torrent.to_vec()
+        };
+        let path = self.move_file(key);
+        let written = path
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| std::fs::write(&path, bytes));
+        if let Err(e) = written {
+            self.notice(
+                format!("Could not move {name}: could not write {}: {e}", path.display()),
+                true,
+            );
+            return false;
+        }
+        let note = MoveNote {
+            from,
+            to: dir.to_path_buf(),
+            files,
+            only_files: handle.only_files(),
+            announce,
+        };
+        let Some(record) = self.store.data.torrents.get_mut(key) else {
+            return false;
+        };
+        record.moving = Some(note);
+        self.save();
+        if let Err(e) = session.delete(TorrentIdOrHash::Id(handle.id()), false).await {
+            if let Some(record) = self.store.data.torrents.get_mut(key) {
+                record.moving = None;
+            }
+            let _ = std::fs::remove_file(&path);
+            self.save();
+            self.notice(format!("Could not move {name}: {e:#}"), true);
+            return false;
+        }
+        self.notice(format!("Moving {name} to {}", dir.display()), false);
+        true
     }
 
     /// Starts the moves that are noted and not running (just asked for, or left over from
@@ -169,6 +218,12 @@ impl Worker {
                 ),
                 true,
             ),
+        }
+        // A finish held back for the move is given now, wherever the data ended up.
+        if note.announce {
+            if let Some(handle) = self.find(&key) {
+                self.finished(&key, &handle);
+            }
         }
     }
 }

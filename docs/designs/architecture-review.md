@@ -38,7 +38,8 @@ Released in 0.13.4. 127 tests pass and clippy shows no warnings.
 | Z4 | Done in the fork and in core | Fork branch `feat/rustls-no-provider` adds a librqbit feature with reqwest's `rustls-no-provider`. Core uses rustls and tokio-rustls with `ring`, and `use_ring()` (`lib.rs`) installs ring's provider before any session or HTTP client is made. The certificate, the remote-control password hash and the fingerprint use ring. `cargo tree -i aws-lc-rs` finds nothing now. 1,426,496 bytes smaller, measured, against the 1.1 MB estimate. One HTTPS feed fetch through the app's client worked. **Two costs.** First, rustls with ring has no post-quantum key exchange: it offers X25519, P-256 and P-384 only (rustls 0.23.46 source). Second, ring's SHA-1 is plain Rust: 436 MiB/s against aws-lc's 2,464 MiB/s, measured. So torrent making (`make.rs`) now hashes with `crypto-hash`, which the engine already uses: 2,496 MiB/s on macOS, measured. Unoptimised, ring's PBKDF2 took 1.4 s against 76 ms optimised, which broke the login-limit test. ring is now built optimised in debug builds too. |
 | Z5 | Not done, by choice | Names of old torrents that aren't UTF-8 would show garbled. About 0.3 MB, estimated, isn't worth that. |
 | Z6 | Waiting | Nothing to do until accesskit and eframe move to objc2 0.6. |
-| Features 2–18 | Not started | Left for later releases, one at a time. |
+| Feature 2 | Done, not released | `incomplete_dir` in Settings. A torrent starts there and is moved to its own folder when it finishes, through the existing move code (`moving.rs` `start_final_moves`). The finish notice and program wait until the move ends. It starts straight in its own folder when data for it is already there. Tests `start_folder_choice` and `torrent_files_are_relative_to_its_folder`. A loopback run with two cores and a local tracker (8 MB, two files) showed Downloading in the unfinished folder, then Moving, then the files in the download folder, matching the source, with "Finished downloading" after "Moved". Adding it again later went straight to the download folder. |
+| Features 3–18 | Not started | Left for later releases, one at a time. |
 | S7 | Tried, dropped | With 4 workers: 11 threads instead of 18, the same seeding footprint (50 MB), and higher seeding CPU (0.46% against 0.32%). One run only. No gain worth the recheck risk. |
 
 Debian runs with the M2 and S7 builds (one run each unless marked):
@@ -195,7 +196,7 @@ Z1 (cold crates at `opt-level = "s"`), S4 (cached sort key), S5 (counts in `rebu
 - **Memory:** idle stays at about 43 MB footprint. Seeding: 49–53 MB footprint, measured, the same as 0.13.3.
 
 ### Next release (medium effort, clear payoff)
-Z2 (macOS clipboard), M6 (shared speed history), S2 and S3 (tick caches), and features 2–8. **Z2, M6, S2 and S3 are done. Features 2–8 are not started.** S1 was wrong; M2 and S7 were tried and dropped.
+Z2 (macOS clipboard), M6 (shared speed history), S2 and S3 (tick caches), and features 2–8. **Z2, M6, S2, S3 and feature 2 are done. Features 3–8 are not started.** S1 was wrong; M2 and S7 were tried and dropped.
 - **Size:** 16.43 MiB, measured. Still over 15 MiB.
 - **Memory:** no change measured. The M2 saving didn't show up in the runs. A menu-bar mode might lower memory while the window is hidden; that is unmeasured.
 

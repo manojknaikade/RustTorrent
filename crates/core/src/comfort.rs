@@ -257,10 +257,10 @@ pub(crate) fn run_finish_program(line: &str, name: &str, folder: &Path) -> Resul
 }
 
 /// True when nothing is left to download: no torrent is downloading, getting its details,
-/// being checked, or waiting its turn with parts still missing.
+/// being checked, having its data moved, or waiting its turn with parts still missing.
 pub fn nothing_left(torrents: &[TorrentView]) -> bool {
     !torrents.iter().any(|t| match t.state {
-        State::Downloading | State::FetchingInfo | State::Checking => true,
+        State::Downloading | State::FetchingInfo | State::Checking | State::Moving => true,
         State::Queued | State::Scheduled | State::Blocked => t.done < t.total || t.total == 0,
         _ => false,
     })
@@ -498,6 +498,9 @@ mod tests {
         assert!(!t.should_quit(WhenAllDone::Nothing, &seeding));
         let busy = [view(State::Seeding, 10, 10), view(State::Queued, 1, 10)];
         assert!(!t.should_quit(WhenAllDone::Quit, &busy));
+        // A finished torrent still being moved out of the folder for unfinished downloads.
+        let moving = [view(State::Seeding, 10, 10), view(State::Moving, 10, 10)];
+        assert!(!t.should_quit(WhenAllDone::Quit, &moving));
         t.disarm();
         assert!(!t.should_quit(WhenAllDone::Quit, &seeding));
     }

@@ -21,6 +21,9 @@ pub const SCHEMA_VERSION: u32 = 1;
 #[serde(default)]
 pub struct Settings {
     pub download_dir: PathBuf,
+    /// Unfinished downloads are kept here, and each is moved to its own folder once it
+    /// finishes. `None` downloads straight into that folder.
+    pub incomplete_dir: Option<PathBuf>,
     /// Download limit in KiB/s. 0 means no limit.
     pub down_limit_kib: u32,
     /// Upload limit in KiB/s. 0 means no limit.
@@ -106,6 +109,7 @@ impl Default for Settings {
             .unwrap_or_else(|| PathBuf::from("."));
         Self {
             download_dir,
+            incomplete_dir: None,
             down_limit_kib: 0,
             up_limit_kib: 0,
             max_downloads: 0,
@@ -160,6 +164,9 @@ pub struct Record {
     pub priorities: crate::priority::FilePriorities,
     /// A move of its data to another folder that has not ended yet.
     pub moving: Option<crate::relocate::MoveNote>,
+    /// Where the data goes once the download finishes, while it is kept in the folder
+    /// for unfinished downloads. See [`Settings::incomplete_dir`].
+    pub final_dir: Option<PathBuf>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
@@ -313,6 +320,7 @@ mod tests {
         store.data.settings.schedule.enabled = true;
         store.data.pending.push("magnet:?xt=urn:btih:abc".into());
         store.data.settings.watch_dir = Some(PathBuf::from("/tmp/watch"));
+        store.data.settings.incomplete_dir = Some(PathBuf::from("/tmp/unfinished"));
         store.data.settings.bind_interface = Some("utun4".into());
         store.data.settings.ask_before_add = false;
         store
@@ -366,7 +374,9 @@ mod tests {
                     to: "/b".into(),
                     files: vec!["x/y.iso".into()],
                     only_files: Some(vec![0]),
+                    announce: true,
                 }),
+                final_dir: Some("/done".into()),
             },
         );
         store.save().unwrap();
