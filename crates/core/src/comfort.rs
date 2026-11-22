@@ -90,6 +90,8 @@ pub struct ComfortSettings {
     pub when_all_done: WhenAllDone,
     /// Columns of the torrent list the user has hidden, by their title.
     pub hidden_columns: Vec<String>,
+    /// Show an icon in the menu bar, and keep running there when the window is closed.
+    pub menu_bar: bool,
 }
 
 impl Default for ComfortSettings {
@@ -101,6 +103,7 @@ impl Default for ComfortSettings {
             on_finish_program: String::new(),
             when_all_done: WhenAllDone::Nothing,
             hidden_columns: Vec::new(),
+            menu_bar: false,
         }
     }
 }

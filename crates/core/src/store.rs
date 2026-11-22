@@ -270,13 +270,16 @@ impl Store {
                         data.settings.watch_dirs.push(WatchFolder { dir, category: None });
                     }
                 }
-                Ok((
-                    Self {
-                        path: path.to_owned(),
-                        data,
-                    },
-                    None,
-                ))
+                let moved = crate::secrets::after_load(path, &mut data.settings.network.proxy.password);
+                let store = Self {
+                    path: path.to_owned(),
+                    data,
+                };
+                if moved {
+                    // Rewrite the file now so the password does not stay in it.
+                    store.save()?;
+                }
+                Ok((store, crate::secrets::take_note()))
             }
             Err(e) => {
                 let aside = path.with_extension(format!("unreadable-{}.json", crate::now_secs()));
@@ -291,6 +294,7 @@ impl Store {
 
     /// Writes to a temporary file, flushes it to disk, then renames it over the old one.
     pub fn save(&self) -> anyhow::Result<()> {
+        crate::secrets::before_save(&self.path, &self.data.settings.network.proxy.password);
         let tmp = self.path.with_extension("json.tmp");
         if let Some(dir) = self.path.parent() {
             std::fs::create_dir_all(dir)?;
@@ -445,6 +449,23 @@ mod tests {
         assert!(note.is_none());
         assert_eq!(store.data.torrents["aa"], Record::default());
         assert!(store.data.settings.ask_before_add, "files from before 0.7 still ask");
+    }
+
+    #[test]
+    fn proxy_password_stays_in_the_file_without_the_keychain() {
+        // Tests never turn the Keychain on, as other front ends don't.
+        let path = temp("proxy");
+        std::fs::write(
+            &path,
+            r#"{"schema_version":1,"settings":{"network":{"proxy":{"enabled":true,"host":"h","port":1080,"user":"u","password":"p4ss"}}}}"#,
+        )
+        .unwrap();
+        let (store, note) = Store::load(&path).unwrap();
+        assert!(note.is_none());
+        assert_eq!(store.data.settings.network.proxy.password, "p4ss");
+        store.save().unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("p4ss"));
     }
 
     #[test]

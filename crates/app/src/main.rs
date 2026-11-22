@@ -12,6 +12,8 @@ mod mac;
 #[cfg(target_os = "macos")]
 mod mac_extras;
 mod make;
+#[cfg(target_os = "macos")]
+mod menu_bar;
 mod network;
 
 use std::path::PathBuf;
@@ -28,6 +30,8 @@ pub(crate) static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 pub(crate) fn deliver(text: String) {
     INBOX.lock().unwrap_or_else(|e| e.into_inner()).push(text);
+    #[cfg(target_os = "macos")]
+    menu_bar::show_if_hidden();
     if let Some(ctx) = CTX.get() {
         ctx.request_repaint();
     }
@@ -59,6 +63,8 @@ fn main() -> eframe::Result {
         .map(PathBuf::from)
         .unwrap_or_else(rusttorrent_core::default_data_dir);
     let _ = DATA_DIR.set(data_dir.clone());
+    // The proxy password lives in the Keychain, not in state.json.
+    rusttorrent_core::secrets::use_keychain();
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()

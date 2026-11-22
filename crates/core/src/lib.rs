@@ -24,6 +24,7 @@ pub mod priority;
 pub mod relocate;
 pub mod remote;
 pub mod rules;
+pub mod secrets;
 pub mod store;
 mod stream;
 

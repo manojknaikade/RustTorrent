@@ -70,6 +70,11 @@ pub struct Extras {
 }
 
 impl Extras {
+    /// Set once "when all downloads finish: quit" has closed the window.
+    pub fn closing(&self) -> bool {
+        self.closing
+    }
+
     /// Runs before each frame, and also while the window is hidden.
     pub fn logic(&mut self, ctx: &egui::Context, snap: &Snapshot) {
         let c = &snap.settings.comfort;
@@ -325,9 +330,27 @@ fn reveal_file(path: &Path) {
 const DOWN: Color32 = Color32::from_rgb(64, 156, 255);
 const UP: Color32 = Color32::from_rgb(52, 199, 123);
 
+/// Gives a widget drawn with glyphs or shapes a name VoiceOver can read.
+pub fn name(response: &egui::Response, kind: egui::Role, text: impl Into<String>) {
+    let text = text.into();
+    response.widget_info(|| egui::WidgetInfo::labeled(kind, true, &text));
+}
+
 /// Download and upload speed over the last few minutes, newest on the right.
 pub fn speed_graph(ui: &mut egui::Ui, speeds: &SpeedHistory, size: Vec2, labels: bool) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    if labels {
+        // The toolbar's small graph is named by `sparkline`.
+        response.widget_info(|| {
+            let peak = speeds.series(now(), HISTORY_SECS).iter().map(|&(d, u)| d.max(u)).max().unwrap_or(0);
+            let text = if peak > 0 {
+                format!("Speed graph, last 5 minutes. Peak {}.", format::speed(peak))
+            } else {
+                "Speed graph, last 5 minutes. Idle.".to_owned()
+            };
+            egui::WidgetInfo::labeled(egui::Role::Image, true, text)
+        });
+    }
     if !ui.is_rect_visible(rect) {
         return response;
     }
@@ -399,6 +422,15 @@ pub fn speed_graph(ui: &mut egui::Ui, speeds: &SpeedHistory, size: Vec2, labels:
 /// The small graph in the toolbar. A click opens the statistics.
 pub fn sparkline(ui: &mut egui::Ui, extras: &mut Extras, snap: &Snapshot) {
     let response = speed_graph(ui, &snap.speeds, Vec2::new(90.0, 20.0), false);
+    name(
+        &response,
+        egui::Role::Button,
+        format!(
+            "Statistics. Down {}, up {}.",
+            format::speed(snap.down_bps),
+            format::speed(snap.up_bps)
+        ),
+    );
     if response
         .on_hover_text("Speed over the last 5 minutes. Click for statistics.")
         .clicked()
@@ -413,6 +445,16 @@ pub fn sparkline(ui: &mut egui::Ui, extras: &mut Extras, snap: &Snapshot) {
 /// A thin bar that shows which parts of the torrent are downloaded.
 pub fn piece_strip(ui: &mut egui::Ui, map: &PieceMap, fill: Color32) {
     let (rect, response) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 8.0), Sense::hover());
+    let done = if map.cells.is_empty() {
+        0
+    } else {
+        map.cells.iter().map(|&c| c as u64).sum::<u64>() * 100 / (map.cells.len() as u64 * 255)
+    };
+    name(
+        &response,
+        egui::Role::ProgressIndicator,
+        format!("Pieces: {done}% of {} downloaded", map.pieces),
+    );
     let painter = ui.painter_at(rect);
     let empty = ui.visuals().extreme_bg_color;
     painter.rect_filled(rect, 2.0, empty);
@@ -518,6 +560,8 @@ pub fn settings_section(ui: &mut egui::Ui, c: &mut ComfortSettings) -> (bool, bo
     ui.add_space(6.0);
     if cfg!(target_os = "macos") {
         ui.checkbox(&mut c.keep_awake, "Keep the Mac awake while downloading or uploading");
+        ui.checkbox(&mut c.menu_bar, "Show in the menu bar")
+            .on_hover_text("Closing the window then keeps RustTorrent running in the menu bar, without a Dock icon.");
     }
     ui.horizontal(|ui| {
         ui.label("Look");

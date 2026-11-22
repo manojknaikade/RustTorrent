@@ -632,6 +632,7 @@ impl App {
                     if !tag {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let add = ui.small_button("+").on_hover_text("New category");
+                            crate::comfort::name(&add, egui::Role::Button, "New category");
                             if add.clicked() {
                                 new_category = true;
                             }
@@ -1147,7 +1148,8 @@ impl App {
                     let t = &all[idx];
                     row.set_selected(selected.contains(&t.key));
                     row.col(|ui| {
-                        ui.label(RichText::new("●").color(color(t.state)));
+                        let dot = ui.label(RichText::new("●").color(color(t.state)));
+                        crate::comfort::name(&dot, egui::Role::Label, t.state.label());
                     });
                     if shown[1] {
                         row.col(|ui| {
@@ -1787,7 +1789,9 @@ impl App {
                 let mut gone = None;
                 for (i, (dir, category)) in dialog.watch_dirs.iter_mut().enumerate() {
                     ui.horizontal(|ui| {
-                        if ui.small_button("✕").on_hover_text("Stop watching this folder").clicked() {
+                        let stop = ui.small_button("✕").on_hover_text("Stop watching this folder");
+                        crate::comfort::name(&stop, egui::Role::Button, "Stop watching this folder");
+                        if stop.clicked() {
                             gone = Some(i);
                         }
                         ui.add(
@@ -2417,7 +2421,16 @@ impl App {
                 self.quit = true;
             }
         }
-        if ctx.input(|i| i.viewport().close_requested()) && busy && !self.quit_ok {
+        let close = ctx.input(|i| i.viewport().close_requested());
+        #[cfg(target_os = "macos")]
+        let close = if close && !self.quit_ok && !self.extras.closing() && crate::menu_bar::hides_on_close(&self.snap) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            crate::menu_bar::hide(&ctx);
+            false
+        } else {
+            close
+        };
+        if close && busy && !self.quit_ok {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.quit = true;
         }
@@ -2580,6 +2593,8 @@ impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let snap = self.core.snapshot();
         self.extras.logic(ctx, &snap);
+        #[cfg(target_os = "macos")]
+        crate::menu_bar::logic(ctx, &snap, &self.core);
     }
 }
 

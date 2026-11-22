@@ -52,8 +52,9 @@ impl Default for NetworkSettings {
 
 /// A SOCKS5 proxy for torrent traffic.
 ///
-/// The password is kept in the settings file, because the engine needs it each time it
-/// starts. It is never written to the log.
+/// The engine needs the password each time it starts, so it is kept where it can be read
+/// back: in the Keychain on macOS (see [`crate::secrets`]), otherwise in the settings file.
+/// It is never written to the log.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
 #[serde(default)]
 pub struct ProxySettings {
@@ -61,6 +62,7 @@ pub struct ProxySettings {
     pub host: String,
     pub port: u16,
     pub user: String,
+    #[serde(skip_serializing_if = "crate::secrets::in_keychain")]
     pub password: String,
 }
 

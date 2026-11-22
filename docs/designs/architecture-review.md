@@ -196,9 +196,9 @@ Z1 (cold crates at `opt-level = "s"`), S4 (cached sort key), S5 (counts in `rebu
 - **Memory:** idle stays at about 43 MB footprint. Seeding: 49–53 MB footprint, measured, the same as 0.13.3.
 
 ### Next release (medium effort, clear payoff)
-Z2 (macOS clipboard), M6 (shared speed history), S2 and S3 (tick caches), and features 2–8. **Z2, M6, S2, S3 and features 2, 3, 4, 5 and 8 are done. Features 6 and 7 are not started.** S1 was wrong; M2 and S7 were tried and dropped.
+Z2 (macOS clipboard), M6 (shared speed history), S2 and S3 (tick caches), and features 2–8. **Z2, M6, S2, S3 and features 2–8 are done; feature 9 (the Keychain) was done with them.** S1 was wrong; M2 and S7 were tried and dropped.
 - **Size:** 16.43 MiB, measured. Still over 15 MiB.
-- **Memory:** no change measured. The M2 saving didn't show up in the runs. A menu-bar mode might lower memory while the window is hidden; that is unmeasured.
+- **Memory:** no change measured. The M2 saving didn't show up in the runs. The menu-bar mode (feature 7) keeps the wgpu surface while the window is hidden, so it saves no memory; freeing the surface is left out because the saving is unmeasured.
 
 ### Later (large, or needs fork work)
 Z3 (regex-lite in the fork), Z4 (ring in the fork and in core), Z5 (optional chardetng), the qBittorrent-compatible API, import from other clients, NAT-PMP, and features 14–18. **Z3 and Z4 are done. Z5 was skipped by choice. Features 10, 11 and 12 are done. The rest is not started.**

@@ -5,7 +5,7 @@
 //! Apple Event, which is handled directly.
 use eframe::egui;
 use objc2::rc::Retained;
-use objc2::runtime::{AnyClass, AnyObject, Imp, Sel};
+use objc2::runtime::{AnyClass, AnyObject, Bool, Imp, Sel};
 use objc2::{class, define_class, msg_send, sel, AllocAnyThread};
 use objc2_foundation::{NSArray, NSNotification, NSObject, NSString, NSURL};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -23,11 +23,20 @@ pub static ASK_BEFORE_QUIT: AtomicBool = AtomicBool::new(false);
 /// Set when the user chose Quit from the menu (or pressed Cmd-Q) and was not let go yet.
 pub static QUIT_ASKED: AtomicBool = AtomicBool::new(false);
 
+/// `applicationShouldHandleReopen:hasVisibleWindows:`: opening the app again (from the
+/// Finder, Spotlight or the Dock) brings back a window hidden in the menu bar.
+extern "C-unwind" fn should_reopen(_this: &AnyObject, _sel: Sel, _app: &AnyObject, _visible: Bool) -> Bool {
+    crate::menu_bar::show_if_hidden();
+    Bool::YES
+}
+
 /// `applicationShouldTerminate:`. Quit from the menu ends the app without closing the window
 /// first, so the window's own question would never be asked. Returns 0 (cancel) or 1 (now).
 extern "C-unwind" fn should_terminate(_this: &AnyObject, _sel: Sel, _app: &AnyObject) -> usize {
     if ASK_BEFORE_QUIT.load(Ordering::Relaxed) {
         QUIT_ASKED.store(true, Ordering::Relaxed);
+        // The question is asked in the window, which may be hidden in the menu bar.
+        crate::menu_bar::show_if_hidden();
         crate::wake();
         0
     } else {
@@ -87,6 +96,19 @@ define_class!(
                 );
                 if !added.as_bool() {
                     eprintln!("rusttorrent: could not add applicationShouldTerminate:; quitting will not ask first");
+                }
+                let imp: Imp =
+                    std::mem::transmute(should_reopen as extern "C-unwind" fn(&AnyObject, Sel, &AnyObject, Bool) -> Bool);
+                // BOOL is `bool` on Apple silicon and `signed char` on Intel.
+                let types = if cfg!(target_arch = "aarch64") { c"B@:@B" } else { c"c@:@c" };
+                let added = objc2::ffi::class_addMethod(
+                    cls as *mut AnyClass,
+                    sel!(applicationShouldHandleReopen:hasVisibleWindows:),
+                    imp,
+                    types.as_ptr(),
+                );
+                if !added.as_bool() {
+                    eprintln!("rusttorrent: could not add applicationShouldHandleReopen:; reopening will not show the window");
                 }
             }
         }

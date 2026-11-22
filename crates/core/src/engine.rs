@@ -553,6 +553,9 @@ impl Worker {
             }
             Err(e) => self.notice(format!("Could not save settings: {e:#}"), true),
         }
+        if let Some(note) = crate::secrets::take_note() {
+            self.notice(note, true);
+        }
     }
 
     fn handles(&self) -> Vec<Handle> {
