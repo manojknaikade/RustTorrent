@@ -4,7 +4,7 @@ Reviewed version 0.13.3 (commit `9f31d2e`) on Apple Silicon (10 cores), 21 Novem
 
 ## Do these three first
 
-All three are now done; see "Results after the changes". So are the two fork changes, Z3 and Z4. The app is 14.12 MiB, measured. Seeding footprint was 52 MB, so the README's 104 MB was most likely RSS. M2 was tried and dropped.
+All three are now done; see "Results after the changes". So are the two fork changes, Z3 and Z4. The app was 14.12 MiB after them and is 14.50 MiB with the later features, measured. Seeding footprint was 52 MB, so the README's 104 MB was most likely RSS. M2 was tried and dropped.
 
 1. **Build cold crates for size** (Z1). This is one block in the workspace `Cargo.toml`. It cuts the binary from 17.49 MiB to 16.78 MiB, measured. No other size change is this cheap.
 2. **Measure seeding memory with `footprint` before you change anything for memory.** At idle with the window open, the footprint is 43 MB, measured. RSS is 90 MB, because RSS also counts shared system libraries. The README's "about 104 MB while seeding" doesn't say which number it is. If it was RSS, the 100 MB target may already be met. After measuring, lower the default peer count (M2). That's the one large memory lever in this repo.
@@ -203,6 +203,7 @@ Z2 (macOS clipboard), M6 (shared speed history), S2 and S3 (tick caches), and fe
 ### Later (large, or needs fork work)
 Z3 (regex-lite in the fork), Z4 (ring in the fork and in core), Z5 (optional chardetng), the qBittorrent-compatible API, import from other clients, NAT-PMP, and features 14–18. **Z3 and Z4 are done. Z5 was skipped by choice. Features 10–13 are done. Feature 14 is done for the blocklist, banned peers and NAT-PMP. From 15, tracker editing, rename and web seeds are done, and encryption and pure v2 are deferred. Feature 17 is done through AppleScript, which Shortcuts can run. Features 16 and 18 were skipped.**
 - **Size:** 16.43 → 15.49 MiB after Z3 and 14.12 MiB after Z4, measured. Under 15 MiB. Z5 might take off about 0.3 MiB more, estimated.
+- **Size with all the features above:** 14.50 MiB (15,203,136 bytes), measured on 22 November 2026 at commit `77a8ea4`. That is 467 KiB more than 0.13.4 (14,724,880 bytes) and still under 15 MiB. The zipped app grew from 7,091,277 to 7,333,975 bytes. The growth per feature wasn't measured.
 - **Memory:** no change expected.
 
 ## 6. Things not to do
