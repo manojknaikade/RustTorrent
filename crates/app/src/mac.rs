@@ -125,6 +125,7 @@ pub fn install() {
     }
     std::mem::forget(observer); // lives for the whole run
     give_back_memory();
+    keep_default();
 }
 
 /// macOS malloc keeps freed pages and counts them against the app, so after a busy
@@ -144,29 +145,141 @@ fn give_back_memory() {
 
 /// The name macOS knows this app by. It must match the bundle's Info.plist.
 pub const BUNDLE_ID: &str = "io.github.manojknaikade.rusttorrent";
+/// The type macOS gives `.torrent` files. The bundle declares it too.
+const TORRENT_TYPE: &str = "org.bittorrent.torrent";
+/// kLSRolesAll: open, edit and view.
+const ALL_ROLES: u32 = 0xFFFF_FFFF;
 
 #[link(name = "CoreServices", kind = "framework")]
 unsafe extern "C" {
-    // Both take and give CFString, which is the same object as NSString.
+    // These take and give CFString and CFURL, which are the same objects as NSString and NSURL.
     fn LSCopyDefaultHandlerForURLScheme(scheme: *const NSString) -> *mut NSString;
     fn LSSetDefaultHandlerForURLScheme(scheme: *const NSString, bundle_id: *const NSString) -> i32;
+    fn LSCopyDefaultRoleHandlerForContentType(kind: *const NSString, role: u32) -> *mut NSString;
+    fn LSSetDefaultRoleHandlerForContentType(kind: *const NSString, role: u32, bundle_id: *const NSString) -> i32;
+    fn LSRegisterURL(url: *const NSURL, update: u8) -> i32;
 }
 
-/// The bundle identifier of the app that macOS opens magnet links with, if there is one.
-pub fn magnet_handler() -> Option<String> {
-    let scheme = NSString::from_str("magnet");
-    unsafe {
-        let id = LSCopyDefaultHandlerForURLScheme(&*scheme);
-        Retained::from_raw(id).map(|s| s.to_string())
+/// The apps macOS opens magnet links and `.torrent` files with, by bundle identifier.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Handlers {
+    pub magnet: Option<String>,
+    pub torrent: Option<String>,
+}
+
+fn is_us(id: &Option<String>) -> bool {
+    id.as_deref().is_some_and(|id| id.eq_ignore_ascii_case(BUNDLE_ID))
+}
+
+impl Handlers {
+    /// RustTorrent opens both.
+    pub fn ours(&self) -> bool {
+        is_us(&self.magnet) && is_us(&self.torrent)
+    }
+
+    /// Words for who opens them now, for the Settings dialog.
+    pub fn describe(&self) -> String {
+        let name = |id: &Option<String>| id.as_deref().map(app_name).unwrap_or_else(|| "no app".to_owned());
+        match (is_us(&self.magnet), is_us(&self.torrent)) {
+            (true, true) => "Magnet links and .torrent files open in RustTorrent.".to_owned(),
+            (false, true) => format!("Magnet links open in {}.", name(&self.magnet)),
+            (true, false) => format!(".torrent files open in {}.", name(&self.torrent)),
+            (false, false) if self.magnet.is_none() && self.torrent.is_none() => {
+                "No app is set to open magnet links or .torrent files.".to_owned()
+            }
+            (false, false) if self.magnet == self.torrent => {
+                format!("Magnet links and .torrent files open in {}.", name(&self.magnet))
+            }
+            (false, false) => format!(
+                "Magnet links open in {}, .torrent files in {}.",
+                name(&self.magnet),
+                name(&self.torrent)
+            ),
+        }
     }
 }
 
-/// Asks macOS to open magnet links with this app from now on. macOS may ask the user to
-/// agree. Returns false if macOS refused at once.
-pub fn make_magnet_handler() -> bool {
+pub fn handlers() -> Handlers {
     let scheme = NSString::from_str("magnet");
+    let kind = NSString::from_str(TORRENT_TYPE);
+    unsafe {
+        let magnet = Retained::from_raw(LSCopyDefaultHandlerForURLScheme(&*scheme)).map(|s| s.to_string());
+        let torrent =
+            Retained::from_raw(LSCopyDefaultRoleHandlerForContentType(&*kind, ALL_ROLES)).map(|s| s.to_string());
+        Handlers { magnet, torrent }
+    }
+}
+
+/// The name an app shows in the Finder, from its bundle identifier.
+fn app_name(id: &str) -> String {
+    let ns_id = NSString::from_str(id);
+    unsafe {
+        let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
+        let url: Option<Retained<NSURL>> = msg_send![workspace, URLForApplicationWithBundleIdentifier: &*ns_id];
+        url.and_then(|url| url.URLByDeletingPathExtension())
+            .and_then(|url| url.lastPathComponent())
+            .map(|name| name.to_string())
+            .unwrap_or_else(|| id.to_owned())
+    }
+}
+
+/// The app bundle this process runs from, if it is RustTorrent's (not `cargo run`).
+fn own_bundle() -> Option<Retained<NSURL>> {
+    unsafe {
+        let bundle: *mut AnyObject = msg_send![class!(NSBundle), mainBundle];
+        let id: Option<Retained<NSString>> = msg_send![bundle, bundleIdentifier];
+        if !id.is_some_and(|id| id.to_string().eq_ignore_ascii_case(BUNDLE_ID)) {
+            return None;
+        }
+        msg_send![bundle, bundleURL]
+    }
+}
+
+/// Makes RustTorrent the app for magnet links and `.torrent` files, in place of whatever
+/// app (often qBittorrent) has them. The running copy is registered again first, so macOS
+/// opens this copy rather than an older one it still remembers.
+pub fn make_default() -> Result<(), String> {
+    let Some(bundle) = own_bundle() else {
+        return Err("Only RustTorrent.app can be the default, not a copy run from a terminal.".to_owned());
+    };
+    let scheme = NSString::from_str("magnet");
+    let kind = NSString::from_str(TORRENT_TYPE);
     let id = NSString::from_str(BUNDLE_ID);
-    unsafe { LSSetDefaultHandlerForURLScheme(&*scheme, &*id) == 0 }
+    let (magnet, torrent) = unsafe {
+        LSRegisterURL(&*bundle, 1);
+        (
+            LSSetDefaultHandlerForURLScheme(&*scheme, &*id),
+            LSSetDefaultRoleHandlerForContentType(&*kind, ALL_ROLES, &*id),
+        )
+    };
+    let now = handlers();
+    if now.ours() {
+        return Ok(());
+    }
+    Err(format!(
+        "macOS did not change it (codes {magnet} and {torrent}). {}",
+        now.describe()
+    ))
+}
+
+/// Set from the settings: take magnet links and `.torrent` files back whenever another app
+/// makes itself their default. qBittorrent does this each time it starts.
+pub static KEEP_DEFAULT: AtomicBool = AtomicBool::new(false);
+
+/// Checks every 20 s, and does nothing while [`KEEP_DEFAULT`] is off.
+fn keep_default() {
+    if own_bundle().is_none() {
+        return;
+    }
+    let spawned = std::thread::Builder::new().name("default app".into()).spawn(|| loop {
+        std::thread::sleep(std::time::Duration::from_secs(20));
+        if KEEP_DEFAULT.load(Ordering::Relaxed) && !handlers().ours() {
+            if let Err(e) = make_default() {
+                eprintln!("rusttorrent: could not take back magnet links: {e}");
+            }
+        }
+    });
+    drop(spawned);
 }
 
 /// The system pasteboard, text only. egui's own clipboard support also handles images,
@@ -267,5 +380,45 @@ pub fn copy_out(ctx: &egui::Context) {
     });
     if let Some(text) = copied.last() {
         pasteboard::set_text(text);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_and_describes_handlers() {
+        let h = handlers();
+        let words = h.describe();
+        assert!(words.ends_with('.'), "{words}");
+        // A test binary is not the app bundle, so it must not change the defaults.
+        assert!(own_bundle().is_none());
+        assert!(make_default().is_err());
+        assert_eq!(handlers(), h);
+        println!("{words}");
+    }
+
+    #[test]
+    fn describes_mixed_handlers() {
+        let us = Some(BUNDLE_ID.to_owned());
+        let other = Some("org.example.none-such".to_owned());
+        let both = Handlers {
+            magnet: us.clone(),
+            torrent: us.clone(),
+        };
+        assert!(both.ours());
+        assert_eq!(both.describe(), "Magnet links and .torrent files open in RustTorrent.");
+        let mixed = Handlers {
+            magnet: other.clone(),
+            torrent: us,
+        };
+        assert!(!mixed.ours());
+        assert_eq!(mixed.describe(), "Magnet links open in org.example.none-such.");
+        let none = Handlers {
+            magnet: None,
+            torrent: None,
+        };
+        assert_eq!(none.describe(), "No app is set to open magnet links or .torrent files.");
     }
 }

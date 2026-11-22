@@ -113,9 +113,12 @@ struct SettingsDialog {
     remote_lan: bool,
     /// A new password for remote control. Empty keeps the one already set.
     remote_password: String,
-    /// The app macOS opens magnet links with, by its bundle identifier. Mac only.
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-    magnet_handler: Option<String>,
+    /// The apps macOS opens magnet links and `.torrent` files with.
+    #[cfg(target_os = "macos")]
+    handlers: crate::mac::Handlers,
+    /// Why making RustTorrent their default failed, if it did.
+    #[cfg(target_os = "macos")]
+    default_app_problem: Option<String>,
     ask_before_add: bool,
     /// Pause downloads when less than this many MiB is free. 0 is off.
     keep_free_mib: u64,
@@ -187,9 +190,9 @@ impl SettingsDialog {
             remote_lan: s.remote.lan,
             remote_password: String::new(),
             #[cfg(target_os = "macos")]
-            magnet_handler: crate::mac::magnet_handler(),
-            #[cfg(not(target_os = "macos"))]
-            magnet_handler: None,
+            handlers: crate::mac::handlers(),
+            #[cfg(target_os = "macos")]
+            default_app_problem: None,
             ask_before_add: s.ask_before_add,
             keep_free_mib: s.keep_free_mib,
             network: crate::network::Form::of(&s.network),
@@ -1983,24 +1986,21 @@ impl App {
                 {
                     ui.add_space(8.0);
                     ui.separator();
-                    let ours = dialog
-                        .magnet_handler
-                        .as_deref()
-                        .is_some_and(|id| id.eq_ignore_ascii_case(crate::mac::BUNDLE_ID));
-                    if ours {
-                        ui.label("Magnet links clicked in a browser open in RustTorrent.");
-                    } else {
-                        ui.horizontal(|ui| {
-                            ui.label(match &dialog.magnet_handler {
-                                Some(id) => format!("Magnet links now open in another app ({id})."),
-                                None => "No app is set to open magnet links.".to_owned(),
-                            });
-                            if ui.button("Open them in RustTorrent").clicked() {
-                                crate::mac::make_magnet_handler();
-                                dialog.magnet_handler = crate::mac::magnet_handler();
-                            }
-                        });
+                    let ours = dialog.handlers.ours();
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(dialog.handlers.describe());
+                        if !ours && ui.button("Open them in RustTorrent").clicked() {
+                            dialog.default_app_problem = crate::mac::make_default().err();
+                            dialog.handlers = crate::mac::handlers();
+                        }
+                    });
+                    if let Some(problem) = &dialog.default_app_problem {
+                        ui.colored_label(ui.visuals().warn_fg_color, problem);
                     }
+                    ui.checkbox(
+                        &mut dialog.comfort.keep_default_app,
+                        "Keep it that way: take them back when another app, such as qBittorrent, makes itself the default",
+                    );
                 }
                 ui.add_space(8.0);
                 ui.separator();
@@ -2709,6 +2709,11 @@ impl eframe::App for App {
         self.extras.logic(ctx, &snap);
         #[cfg(target_os = "macos")]
         crate::menu_bar::logic(ctx, &snap, &self.core);
+        #[cfg(target_os = "macos")]
+        crate::mac::KEEP_DEFAULT.store(
+            snap.settings.comfort.keep_default_app,
+            std::sync::atomic::Ordering::Relaxed,
+        );
     }
 }
 

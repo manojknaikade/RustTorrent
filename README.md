@@ -16,7 +16,7 @@ brew install --cask manojknaikade/tap/rusttorrent
 
 This puts RustTorrent in `/Applications`. Later versions arrive with `brew upgrade`.
 
-To have magnet links in a browser open in RustTorrent, open Settings in the app: the last line says which app macOS uses for magnet links, with a button to change it to RustTorrent.
+To have magnet links in a browser and `.torrent` files in the Finder open in RustTorrent, open Settings in the app: it says which app macOS uses for them now, with a button to change it to RustTorrent. Some apps, such as qBittorrent, take them back each time they start; tick "Keep it that way" under the button and RustTorrent takes them back in turn, within 20 seconds.
 
 ## What works in 0.14
 
@@ -109,7 +109,7 @@ On a Mac, build the app bundle:
 ./scripts/bundle-macos.sh
 ```
 
-This writes `dist/RustTorrent.app`. Move it to `/Applications` and open it once so macOS learns that it handles magnet links, then make it the default in the app's Settings.
+This writes `dist/RustTorrent.app`. Move it to `/Applications` and open it once so macOS learns that it handles magnet links and `.torrent` files, then make it the default in the app's Settings.
 
 The icon is drawn in `assets/icon.svg`. `assets/RustTorrent.icns` is made from it with `rsvg-convert` (one PNG per size into a `RustTorrent.iconset` folder) and `iconutil -c icns`.
 
@@ -181,7 +181,7 @@ cargo test --workspace
 - The disk guard does not resume downloads when room is made again; resume them by hand. On Windows it does nothing, because free space is not read there yet.
 - Sleep and shut down were checked by automated tests only, not by letting a Mac sleep or shut down.
 - Import was tested against hand-made files only, not files written by Transmission or qBittorrent. Transmission's folder for unfinished downloads is not read. qBittorrent entries that never got their `.torrent` data (magnet links still looking for it) are skipped.
-- The "Open them in RustTorrent" button in Settings was not tested: on the test Mac, RustTorrent was already the app for magnet links.
+- The "Open them in RustTorrent" button and "Keep it that way" in Settings were tested by automated tests and by making the same macOS calls from a script with qBittorrent installed, not by clicking them in the app.
 - Built and tested on Apple Silicon only. The Homebrew install is for Apple Silicon only.
 
 ## License
