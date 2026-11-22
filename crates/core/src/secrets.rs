@@ -40,8 +40,9 @@ static NOTE: Mutex<Option<String>> = Mutex::new(None);
 
 fn give_up(why: String) {
     ON.store(false, Ordering::Relaxed);
-    *NOTE.lock().unwrap_or_else(|e| e.into_inner()) =
-        Some(format!("Keychain: {why}. The proxy password is kept in the settings file instead."));
+    *NOTE.lock().unwrap_or_else(|e| e.into_inner()) = Some(format!(
+        "Keychain: {why}. The proxy password is kept in the settings file instead."
+    ));
 }
 
 /// A message to show if the Keychain was given up on since the last call.
@@ -230,7 +231,8 @@ mod keychain {
             match SecItemCopyMatching(query.0, &mut found) {
                 0 if !found.is_null() => {
                     let found = Owned(found);
-                    let bytes = std::slice::from_raw_parts(CFDataGetBytePtr(found.0), CFDataGetLength(found.0) as usize);
+                    let bytes =
+                        std::slice::from_raw_parts(CFDataGetBytePtr(found.0), CFDataGetLength(found.0) as usize);
                     String::from_utf8(bytes.to_vec())
                         .map(Some)
                         .map_err(|_| "the saved password is not text".to_owned())

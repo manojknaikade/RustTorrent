@@ -2111,12 +2111,7 @@ impl App {
                     if ui.button("Cancel").clicked() {
                         close = true;
                     }
-                    if !own.is_empty()
-                        && ui
-                            .button("Use its own name")
-                            .on_hover_text(own.clone())
-                            .clicked()
-                    {
+                    if !own.is_empty() && ui.button("Use its own name").on_hover_text(own.clone()).clicked() {
                         text.clear();
                         save = true;
                     }
@@ -2124,7 +2119,11 @@ impl App {
             });
             if save {
                 // The torrent's own name typed back means no name of the user's.
-                let name = if text.trim() == own.as_str() { String::new() } else { text.clone() };
+                let name = if text.trim() == own.as_str() {
+                    String::new()
+                } else {
+                    text.clone()
+                };
                 self.core.send(Command::Rename { key: key.clone(), name });
             }
             if save || close || response.should_close() {
@@ -2453,7 +2452,10 @@ impl App {
                         .filter(|l| !l.is_empty())
                         .map(String::from)
                         .collect();
-                    self.core.send(Command::SetTrackers { key: key.clone(), trackers });
+                    self.core.send(Command::SetTrackers {
+                        key: key.clone(),
+                        trackers,
+                    });
                     done = true;
                 } else if ui.button("Cancel").clicked() {
                     done = true;

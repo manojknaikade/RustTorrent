@@ -171,10 +171,16 @@ pub enum Command {
     Reannounce(Vec<String>),
     /// Replace the trackers of a torrent. Lines that are not web or UDP addresses are
     /// left out.
-    SetTrackers { key: String, trackers: Vec<String> },
+    SetTrackers {
+        key: String,
+        trackers: Vec<String>,
+    },
     /// Show a torrent under a name of the user's choosing. An empty name goes back to
     /// the torrent's own.
-    Rename { key: String, name: String },
+    Rename {
+        key: String,
+        name: String,
+    },
     /// Speed limits in KiB/s for these torrents alone, on top of the global ones.
     /// 0 means no limit of its own.
     SetTorrentLimits {
@@ -833,7 +839,9 @@ impl Worker {
     /// Gives a torrent a new list of trackers. The engine restarts it when it is running so
     /// it announces to the new list at once.
     async fn set_trackers(&mut self, key: &str, lines: &[String]) {
-        let (Some(session), Some(handle)) = (self.session.clone(), self.find(key)) else { return };
+        let (Some(session), Some(handle)) = (self.session.clone(), self.find(key)) else {
+            return;
+        };
         let name = handle.name().unwrap_or_else(|| key.to_owned());
         let (urls, bad) = parse_trackers(lines);
         if handle.with_metadata(|m| m.info.info().private).unwrap_or(false) && urls.is_empty() {
@@ -872,7 +880,12 @@ impl Worker {
             let wanted_net = &self.store.data.settings.network;
             let live = (self.net_used.as_ref())
                 .filter(|(used, _)| crate::network::only_live_differs(used, wanted_net))
-                .map(|(used, _)| (used.natpmp != wanted_net.natpmp, crate::network::blocking_differs(used, wanted_net)));
+                .map(|(used, _)| {
+                    (
+                        used.natpmp != wanted_net.natpmp,
+                        crate::network::blocking_differs(used, wanted_net),
+                    )
+                });
             if let Some((natpmp, blocking)) = live {
                 if natpmp {
                     self.apply_natpmp().await;
@@ -1387,7 +1400,12 @@ impl Worker {
             }
             Command::SetTrackers { key, trackers } => self.set_trackers(&key, &trackers).await,
             Command::Rename { key, name } => {
-                let name: String = name.trim().chars().filter(|c| !c.is_control()).take(MAX_LABEL).collect();
+                let name: String = name
+                    .trim()
+                    .chars()
+                    .filter(|c| !c.is_control())
+                    .take(MAX_LABEL)
+                    .collect();
                 if let Some(record) = self.store.data.torrents.get_mut(&key) {
                     record.label = (!name.is_empty()).then_some(name);
                     self.save();
@@ -1503,9 +1521,7 @@ impl Worker {
             Command::BanPeer(addr) => match crate::network::ban(&mut self.store.data.settings.network, &addr) {
                 Ok(ip) => {
                     self.notice(
-                        format!(
-                            "Banned {ip}. Connections from it are refused from now on."
-                        ),
+                        format!("Banned {ip}. Connections from it are refused from now on."),
                         false,
                     );
                     self.last_try = None;
@@ -2370,7 +2386,10 @@ mod tests {
         ];
         let (urls, bad) = parse_trackers(&lines);
         let urls: Vec<String> = urls.iter().map(|u| u.to_string()).collect();
-        assert_eq!(urls, ["udp://tracker.example:1337/announce", "https://t.example/announce"]);
+        assert_eq!(
+            urls,
+            ["udp://tracker.example:1337/announce", "https://t.example/announce"]
+        );
         assert_eq!(bad, ["not-a-tracker", "ftp://x.example/"]);
     }
 }

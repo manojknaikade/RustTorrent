@@ -869,7 +869,13 @@ fn act(name: &str, params: &Params, snap: &Snapshot) -> Option<Answer> {
                 return Some(Err((404, "Torrent hash was not found")));
             };
             let name = params.get("name").unwrap_or("").to_owned();
-            Ok((vec![Command::Rename { key: t.key.clone(), name }], ""))
+            Ok((
+                vec![Command::Rename {
+                    key: t.key.clone(),
+                    name,
+                }],
+                "",
+            ))
         }
         "torrents/setLocation" => Err((403, "Folders can only be changed at the computer.")),
         "transfer/setDownloadLimit" | "transfer/setUploadLimit" => {

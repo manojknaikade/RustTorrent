@@ -342,7 +342,12 @@ pub fn speed_graph(ui: &mut egui::Ui, speeds: &SpeedHistory, size: Vec2, labels:
     if labels {
         // The toolbar's small graph is named by `sparkline`.
         response.widget_info(|| {
-            let peak = speeds.series(now(), HISTORY_SECS).iter().map(|&(d, u)| d.max(u)).max().unwrap_or(0);
+            let peak = speeds
+                .series(now(), HISTORY_SECS)
+                .iter()
+                .map(|&(d, u)| d.max(u))
+                .max()
+                .unwrap_or(0);
             let text = if peak > 0 {
                 format!("Speed graph, last 5 minutes. Peak {}.", format::speed(peak))
             } else {

@@ -168,7 +168,11 @@ fn chosen(event: &AnyObject, reply: &AnyObject) -> Option<Vec<String>> {
             .map(|t| t.key.clone())
             .collect();
         if found.is_empty() {
-            fail(reply, NO_SUCH_OBJECT, &format!("There is no torrent called \u{201c}{want}\u{201d}."));
+            fail(
+                reply,
+                NO_SUCH_OBJECT,
+                &format!("There is no torrent called \u{201c}{want}\u{201d}."),
+            );
             return None;
         }
         keys.extend(found);

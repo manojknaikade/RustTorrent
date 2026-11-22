@@ -14,9 +14,9 @@ mod mac_extras;
 mod make;
 #[cfg(target_os = "macos")]
 mod menu_bar;
+mod network;
 #[cfg(target_os = "macos")]
 mod scripting;
-mod network;
 
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
