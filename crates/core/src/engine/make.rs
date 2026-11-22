@@ -65,7 +65,7 @@ impl Worker {
             return self.notice("The details of this torrent have not arrived yet.", true);
         };
         let bytes = if torrent.is_empty() {
-            let mut trackers: Vec<String> = handle.shared().trackers.iter().map(|u| u.to_string()).collect();
+            let mut trackers: Vec<String> = handle.shared().trackers().iter().map(|u| u.to_string()).collect();
             trackers.sort();
             make::from_info(&info, &trackers)
         } else {

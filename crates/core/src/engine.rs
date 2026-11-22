@@ -169,6 +169,9 @@ pub enum Command {
     Recheck(Vec<String>),
     /// Tell the trackers about these torrents now instead of waiting for the next time.
     Reannounce(Vec<String>),
+    /// Replace the trackers of a torrent. Lines that are not web or UDP addresses are
+    /// left out.
+    SetTrackers { key: String, trackers: Vec<String> },
     /// Speed limits in KiB/s for these torrents alone, on top of the global ones.
     /// 0 means no limit of its own.
     SetTorrentLimits {
@@ -334,6 +337,8 @@ struct Worker {
     announce: HashSet<String>,
     /// Plays files while they download. Started the first time one is played.
     streams: Option<crate::stream::Streams>,
+    /// Keeps the port forwarded over NAT-PMP while the engine runs.
+    natpmp: Option<crate::natpmp::Mapper>,
 }
 
 mod make;
@@ -422,6 +427,7 @@ async fn main_loop(
         applied_limits: None,
         session_peers: 0,
         net_used: None,
+        natpmp: None,
         making: None,
         jobs: 0,
         details: Arc::default(),
@@ -682,6 +688,9 @@ impl Worker {
             }
         }
         self.inspector.stop();
+        if let Some(mapper) = self.natpmp.take() {
+            mapper.stop().await;
+        }
         if let Some(session) = self.session.take() {
             session.stop().await;
         }
@@ -732,6 +741,22 @@ impl Worker {
             port: session.listen_addr().map(|a| a.port()),
             ..prepared.status
         };
+        // Not through the proxy: peers reach the proxy, not this computer.
+        if network.natpmp && !network.proxy.enabled {
+            if let Some(port) = status.port {
+                let bind_v4 = bind.as_deref().and_then(|name| {
+                    self.interfaces
+                        .iter()
+                        .find(|i| i.name == name)
+                        .and_then(|i| i.addrs.iter().find_map(|a| a.parse::<std::net::Ipv4Addr>().ok()))
+                        .map(|ip| (name.to_owned(), ip))
+                });
+                // With a chosen interface that has no IPv4 address, NAT-PMP cannot be used.
+                if bind.is_none() || bind_v4.is_some() {
+                    self.natpmp = Some(crate::natpmp::Mapper::start(port, network.utp, bind_v4));
+                }
+            }
+        }
         self.net_used = Some((network, status));
         self.session = Some(session);
         self.bound = bind;
@@ -746,6 +771,59 @@ impl Worker {
         Ok(())
     }
 
+    /// Gives the running engine the new block list and banned peers. Peers now blocked
+    /// are disconnected. When the list cannot be read the engine keeps the old one.
+    async fn reload_blocklist(&mut self) {
+        let Some(session) = self.session.clone() else { return };
+        let network = self.store.data.settings.network.clone();
+        match crate::network::reload_blocklist(&network, &self.data_dir).await {
+            Ok((ranges, count, bad)) => {
+                session.set_ip_filter(ranges, None);
+                if let Some((used, status)) = &mut self.net_used {
+                    *used = network;
+                    status.blocked_ranges = count;
+                    status.blocklist_bad_lines = bad;
+                }
+            }
+            Err(e) => {
+                let text = format!("The block list was not changed: {e:#}");
+                self.notice(text, true);
+                // Not again every second: take the settings as seen so the same error is
+                // not repeated until they change again.
+                if let Some((used, _)) = &mut self.net_used {
+                    *used = network;
+                }
+            }
+        }
+    }
+
+    /// Gives a torrent a new list of trackers. The engine restarts it when it is running so
+    /// it announces to the new list at once.
+    async fn set_trackers(&mut self, key: &str, lines: &[String]) {
+        let (Some(session), Some(handle)) = (self.session.clone(), self.find(key)) else { return };
+        let name = handle.name().unwrap_or_else(|| key.to_owned());
+        let (urls, bad) = parse_trackers(lines);
+        if handle.with_metadata(|m| m.info.info().private).unwrap_or(false) && urls.is_empty() {
+            self.notice(format!("{name} is private: it needs at least one tracker."), true);
+            return;
+        }
+        match session.set_trackers(&handle, urls).await {
+            Ok(()) => {
+                // The details show the list from the engine; read it again.
+                self.meta.remove(key);
+                let text = match bad.len() {
+                    0 => format!("The trackers of {name} were changed."),
+                    _ => format!(
+                        "The trackers of {name} were changed. Left out, not tracker addresses: {}",
+                        bad.join(", ")
+                    ),
+                };
+                self.notice(text, !bad.is_empty());
+            }
+            Err(e) => self.notice(format!("Could not change the trackers of {name}: {e:#}"), true),
+        }
+    }
+
     /// Makes the engine match the chosen interface: stopped while that interface is not
     /// connected or after the choice changed, running otherwise.
     async fn ensure_session(&mut self) {
@@ -758,6 +836,12 @@ impl Worker {
             let replaced = wanted.is_some() && wanted.as_deref().and_then(net::index) != self.bound_index;
             // The engine takes the number of peers per torrent only when it starts.
             let peers = self.session_peers == self.store.data.settings.limits.peers_per_torrent;
+            let wanted_net = &self.store.data.settings.network;
+            let reload = (self.net_used.as_ref())
+                .is_some_and(|(used, _)| crate::network::only_blocking_differs(used, wanted_net));
+            if reload {
+                self.reload_blocklist().await;
+            }
             let changed = self.net_used.as_ref().map(|(n, _)| n) != Some(&self.store.data.settings.network);
             if self.bound == wanted && up && !replaced && peers && !changed {
                 return;
@@ -1265,6 +1349,7 @@ impl Worker {
                     }
                 }
             }
+            Command::SetTrackers { key, trackers } => self.set_trackers(&key, &trackers).await,
             Command::SetTorrentLimits { keys, down_kib, up_kib } => {
                 for key in &keys {
                     if let Some(record) = self.store.data.torrents.get_mut(key) {
@@ -1662,7 +1747,7 @@ impl Worker {
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
-            let mut trackers: Vec<String> = handle.shared().trackers.iter().map(|u| u.to_string()).collect();
+            let mut trackers: Vec<String> = handle.shared().trackers().iter().map(|u| u.to_string()).collect();
             trackers.sort();
             // Details may not be there yet; only remember them once they are.
             if files.is_empty() {
@@ -1998,7 +2083,17 @@ impl Worker {
             remote_error: self.remote_error.clone(),
             inspected: self.inspector.views(),
             slow,
-            network: self.net_used.as_ref().map(|(_, s)| s.clone()).unwrap_or_default(),
+            network: self
+                .net_used
+                .as_ref()
+                .map(|(_, s)| crate::network::NetworkStatus {
+                    natpmp: self
+                        .natpmp
+                        .as_ref()
+                        .and_then(|m| m.state.lock().unwrap_or_else(|e| e.into_inner()).clone()),
+                    ..s.clone()
+                })
+                .unwrap_or_default(),
             making,
             details,
             speeds: self.comfort.speeds.clone(),
@@ -2201,4 +2296,40 @@ async fn add_to_engine(
     let key = handle.info_hash().as_string();
     let name = handle.name().unwrap_or_else(|| key.clone());
     Ok((key, name, already))
+}
+
+/// Reads tracker addresses, one per line or separated by spaces. Gives the addresses in
+/// the order given, without repeats, and the words that are not tracker addresses.
+fn parse_trackers(lines: &[String]) -> (Vec<reqwest::Url>, Vec<String>) {
+    let (mut urls, mut bad) = (Vec::<reqwest::Url>::new(), Vec::new());
+    for word in lines.iter().flat_map(|l| l.split_whitespace()) {
+        match reqwest::Url::parse(word) {
+            Ok(u) if matches!(u.scheme(), "http" | "https" | "udp") && u.host().is_some() => {
+                if !urls.contains(&u) {
+                    urls.push(u);
+                }
+            }
+            _ => bad.push(word.to_owned()),
+        }
+    }
+    (urls, bad)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_trackers;
+
+    #[test]
+    fn reads_tracker_lists() {
+        let lines = vec![
+            "udp://tracker.example:1337/announce".to_owned(),
+            "  https://t.example/announce   udp://tracker.example:1337/announce".to_owned(),
+            String::new(),
+            "not-a-tracker ftp://x.example/".to_owned(),
+        ];
+        let (urls, bad) = parse_trackers(&lines);
+        let urls: Vec<String> = urls.iter().map(|u| u.to_string()).collect();
+        assert_eq!(urls, ["udp://tracker.example:1337/announce", "https://t.example/announce"]);
+        assert_eq!(bad, ["not-a-tracker", "ftp://x.example/"]);
+    }
 }

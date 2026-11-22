@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE dictionary SYSTEM "file://localhost/System/Library/DTDs/sdef.dtd">
+<dictionary title="RustTorrent Terminology">
+  <suite name="RustTorrent Suite" code="RsTt" description="Add torrents, pause and resume them, and read their progress.">
+    <command name="add torrent" code="RsTtAddT" description="Add a magnet link, a web address of a .torrent file, or the path of a .torrent file. The add window opens as it does for a dropped file.">
+      <direct-parameter description="One link or path, or a list of them.">
+        <type type="text"/>
+        <type type="text" list="yes"/>
+      </direct-parameter>
+    </command>
+    <command name="pause torrents" code="RsTtPaus" description="Pause torrents. With no names, pauses every torrent.">
+      <direct-parameter optional="yes" description="Torrent names or keys.">
+        <type type="text"/>
+        <type type="text" list="yes"/>
+      </direct-parameter>
+    </command>
+    <command name="resume torrents" code="RsTtResm" description="Resume torrents. With no names, resumes every torrent.">
+      <direct-parameter optional="yes" description="Torrent names or keys.">
+        <type type="text"/>
+        <type type="text" list="yes"/>
+      </direct-parameter>
+    </command>
+    <command name="torrent list" code="RsTtList" description="Every torrent, with its state and progress.">
+      <result description="One record per torrent.">
+        <type type="torrent info" list="yes"/>
+      </result>
+    </command>
+    <record-type name="torrent info" code="RTin" description="A torrent at the moment it was asked for.">
+      <property name="name" code="pnam" type="text" description="The torrent's name."/>
+      <property name="key" code="TKey" type="text" description="The info-hash in hex. It names the torrent even when two have the same name."/>
+      <property name="state" code="TSta" type="text" description="As the window shows it, such as Downloading or Paused."/>
+      <property name="progress" code="TPrg" type="real" description="Percent done, 0 to 100."/>
+      <property name="size" code="TSiz" type="real" description="Bytes chosen for download."/>
+      <property name="downloaded" code="TDon" type="real" description="Bytes done."/>
+      <property name="download speed" code="TDnS" type="real" description="Bytes per second."/>
+      <property name="upload speed" code="TUpS" type="real" description="Bytes per second."/>
+      <property name="folder" code="TFol" type="text" description="Where the data is saved."/>
+    </record-type>
+  </suite>
+</dictionary>

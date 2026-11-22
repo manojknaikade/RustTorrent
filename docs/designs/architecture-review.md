@@ -181,12 +181,12 @@ Ranked by value divided by effort. The "librqbit" column says whether the engine
 | 10 | qBittorrent-compatible Web API | Phone apps, Sonarr and Radarr need it | Not involved: in-repo, on top of the existing remote server and serde_json | L | Size: about 0.1–0.2 MB, a guess. Memory: none when idle. | Rank 5 |
 | 11 | Import from Transmission or qBittorrent | Switch clients without re-checking everything | Partly: add each torrent with its existing folder, and librqbit rechecks the data. Their `.fastresume` files are bencode, which the fork can already read. | M | None | — |
 | 12 | Several watch folders | Different categories from different drop folders | Not involved: in-repo | S–M | None | — |
-| 13 | NAT-PMP alongside UPnP | Routers without UPnP, such as many Apple and ISP routers | Not in librqbit. NAT-PMP is a small UDP protocol you could write in core. | M | Size: small | — |
-| 14 | Reload the blocklist and network settings without restarting the engine | Today every change restarts the engine (qbittorrent-gap.md:60, 62) | Needs a fork change: the blocklist and listener are fixed when the session starts | M–L | None | Fork |
-| 15 | Tracker editing, rename, encryption setting, web seeds, BitTorrent v2 | Listed qBittorrent gaps | Each one needs a fork change | L each | Small to medium | Fork |
-| 16 | Switch for in-order download (rarest first instead) | Healthier swarms when there are few seeders | Needs a large fork change to the piece picker (qbittorrent-gap.md:122) | L | None | Fork |
-| 17 | Shortcuts or AppleScript support | Automation for power users | Not involved. AppleScript needs a scripting dictionary and Apple Event handlers through objc2. Shortcuts (App Intents) needs Swift. | M–L | Small | — |
-| 18 | Spotlight or Quick Look for `.torrent` files | Look inside a `.torrent` before adding it | Not involved, but it needs a separate Quick Look extension bundle | L | A second binary in the bundle | — |
+| 13 | NAT-PMP alongside UPnP | Routers without UPnP, such as many Apple and ISP routers | Not in librqbit. NAT-PMP is a small UDP protocol you could write in core. | M | Size: small | — **Done:** `natpmp.rs` in core, a setting under Network |
+| 14 | Reload the blocklist and network settings without restarting the engine | Today every change restarts the engine (qbittorrent-gap.md:60, 62) | Needs a fork change: the blocklist and listener are fixed when the session starts | M–L | None | Fork. **Done for the blocklist:** a blocklist-only change is applied to the running session. Other network changes still restart the engine. |
+| 15 | Tracker editing, rename, encryption setting, web seeds, BitTorrent v2 | Listed qBittorrent gaps | Each one needs a fork change | L each | Small to medium | Fork. **Tracker editing done** (Trackers tab). Rename, encryption, web seeds and v2 not started. |
+| 16 | Switch for in-order download (rarest first instead) | Healthier swarms when there are few seeders | Needs a large fork change to the piece picker (qbittorrent-gap.md:122) | L | None | Fork. Skipped. |
+| 17 | Shortcuts or AppleScript support | Automation for power users | Not involved. AppleScript needs a scripting dictionary and Apple Event handlers through objc2. Shortcuts (App Intents) needs Swift. | M–L | Small | — **AppleScript done:** `add torrent`, `pause torrents`, `resume torrents`, `torrent list`. Shortcuts not done. |
+| 18 | Spotlight or Quick Look for `.torrent` files | Look inside a `.torrent` before adding it | Not involved, but it needs a separate Quick Look extension bundle | L | A second binary in the bundle | — Skipped. |
 
 ## 5. Roadmap
 
@@ -201,7 +201,7 @@ Z2 (macOS clipboard), M6 (shared speed history), S2 and S3 (tick caches), and fe
 - **Memory:** no change measured. The M2 saving didn't show up in the runs. The menu-bar mode (feature 7) keeps the wgpu surface while the window is hidden, so it saves no memory; freeing the surface is left out because the saving is unmeasured.
 
 ### Later (large, or needs fork work)
-Z3 (regex-lite in the fork), Z4 (ring in the fork and in core), Z5 (optional chardetng), the qBittorrent-compatible API, import from other clients, NAT-PMP, and features 14–18. **Z3 and Z4 are done. Z5 was skipped by choice. Features 10, 11 and 12 are done. The rest is not started.**
+Z3 (regex-lite in the fork), Z4 (ring in the fork and in core), Z5 (optional chardetng), the qBittorrent-compatible API, import from other clients, NAT-PMP, and features 14–18. **Z3 and Z4 are done. Z5 was skipped by choice. Features 10–13 are done, with the blocklist part of 14, tracker editing from 15 and AppleScript from 17. Features 16 and 18 were skipped. The rest of 14, 15 and 17 is not started.**
 - **Size:** 16.43 → 15.49 MiB after Z3 and 14.12 MiB after Z4, measured. Under 15 MiB. Z5 might take off about 0.3 MiB more, estimated.
 - **Memory:** no change expected.
 

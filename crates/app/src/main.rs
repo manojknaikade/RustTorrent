@@ -14,6 +14,8 @@ mod mac_extras;
 mod make;
 #[cfg(target_os = "macos")]
 mod menu_bar;
+#[cfg(target_os = "macos")]
+mod scripting;
 mod network;
 
 use std::path::PathBuf;
@@ -89,6 +91,8 @@ fn main() -> eframe::Result {
             let ctx = cc.egui_ctx.clone();
             let _ = CTX.set(ctx.clone());
             let core = rusttorrent_core::Core::start(data_dir, move || ctx.request_repaint());
+            #[cfg(target_os = "macos")]
+            scripting::connect(core.remote());
             Ok(Box::new(app::App::new(core)))
         }),
     )

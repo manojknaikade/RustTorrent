@@ -270,6 +270,8 @@ pub struct App {
     /// A file waiting for its stream address: torrent, file, copy instead of play, and
     /// when it was asked for.
     play: Option<(String, usize, bool, std::time::Instant)>,
+    /// The tracker list being edited: torrent and the text, one tracker per line.
+    tracker_edit: Option<(String, String)>,
 }
 
 /// What the sidebar shows next to each status, category and tag.
@@ -417,6 +419,7 @@ impl App {
             extras: Default::default(),
             side: Side::default(),
             play: None,
+            tracker_edit: None,
         }
     }
 
@@ -733,7 +736,7 @@ impl App {
             }
             Tab::Files => self.files(ui, t),
             Tab::Peers => peers(ui, t, &self.core),
-            Tab::Trackers => trackers(ui, t),
+            Tab::Trackers => self.trackers(ui, t),
         }
     }
 
@@ -2365,16 +2368,60 @@ fn peers(ui: &mut egui::Ui, t: &TorrentView, core: &Core) {
         });
 }
 
-fn trackers(ui: &mut egui::Ui, t: &TorrentView) {
-    if t.trackers.is_empty() {
-        ui.label(RichText::new("This torrent has no trackers. Peers are found through the DHT network.").weak());
-        return;
-    }
-    egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-        for tracker in t.trackers.iter() {
-            ui.label(tracker);
+impl App {
+    fn trackers(&mut self, ui: &mut egui::Ui, t: &TorrentView) {
+        let live = !t.is_pending() && t.state != State::Moving;
+        if let Some((key, text)) = self.tracker_edit.as_mut().filter(|(k, _)| k == &t.key) {
+            ui.label(RichText::new("One tracker address per line. Saving announces to the new list.").weak());
+            egui::ScrollArea::vertical()
+                .max_height((ui.available_height() - 36.0).max(60.0))
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::TextEdit::multiline(text)
+                            .code_editor()
+                            .desired_width(f32::INFINITY)
+                            .desired_rows(6)
+                            .hint_text("udp://tracker.example.org:1337/announce"),
+                    );
+                });
+            let mut done = false;
+            ui.horizontal(|ui| {
+                if ui.add_enabled(live, egui::Button::new("Save")).clicked() {
+                    let trackers = text
+                        .lines()
+                        .map(str::trim)
+                        .filter(|l| !l.is_empty())
+                        .map(String::from)
+                        .collect();
+                    self.core.send(Command::SetTrackers { key: key.clone(), trackers });
+                    done = true;
+                } else if ui.button("Cancel").clicked() {
+                    done = true;
+                }
+            });
+            if done {
+                self.tracker_edit = None;
+            }
+            return;
         }
-    });
+        if ui
+            .add_enabled(live, egui::Button::new("Edit trackers…"))
+            .on_hover_text("Add, remove or change this torrent's trackers.")
+            .clicked()
+        {
+            self.tracker_edit = Some((t.key.clone(), t.trackers.join("\n")));
+        }
+        ui.add_space(4.0);
+        if t.trackers.is_empty() {
+            ui.label(RichText::new("This torrent has no trackers. Peers are found through the DHT network.").weak());
+            return;
+        }
+        egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+            for tracker in t.trackers.iter() {
+                ui.label(tracker);
+            }
+        });
+    }
 }
 
 impl App {

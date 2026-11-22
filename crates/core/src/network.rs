@@ -20,6 +20,8 @@ pub struct NetworkSettings {
     pub port: u16,
     /// Ask the router to forward the port (UPnP).
     pub upnp: bool,
+    /// Also ask the router over NAT-PMP, for routers and VPNs without UPnP.
+    pub natpmp: bool,
     /// Find peers through the DHT network.
     pub dht: bool,
     /// Find peers on the same local network.
@@ -40,6 +42,7 @@ impl Default for NetworkSettings {
         Self {
             port: 0,
             upnp: true,
+            natpmp: true,
             dht: true,
             local_discovery: true,
             utp: false,
@@ -181,6 +184,8 @@ pub struct NetworkStatus {
     pub blocked_ranges: usize,
     /// Lines of the block list file that could not be read.
     pub blocklist_bad_lines: usize,
+    /// What the router said over NAT-PMP, once it answered.
+    pub natpmp: Option<String>,
 }
 
 /// The parts of the engine's options that come from the network settings.
@@ -234,6 +239,7 @@ pub(crate) async fn prepare(
             port: None,
             blocked_ranges: list.len(),
             blocklist_bad_lines: list.bad_lines,
+            natpmp: None,
         },
     })
 }
@@ -253,6 +259,36 @@ fn dht_config(data_dir: &Path) -> librqbit::DhtSessionConfig {
 
 /// The DHT state file, in the data folder.
 const DHT_FILE: &str = "dht.json";
+
+/// Builds the block list again for a running engine, without restarting it. Gives the
+/// list the engine takes and the new counts for the status.
+pub(crate) async fn reload_blocklist(
+    settings: &NetworkSettings,
+    data_dir: &Path,
+) -> anyhow::Result<(librqbit::IpRanges, usize, usize)> {
+    let (url, list) = {
+        let settings = settings.clone();
+        let data_dir = data_dir.to_owned();
+        tokio::task::spawn_blocking(move || write_blocklist(&settings, &data_dir)).await??
+    };
+    let ranges = match url {
+        // Read back the way the engine reads it at start, so both agree.
+        Some(_) => librqbit::IpRanges::load_from_file(data_dir.join("blocklist.txt")).await?,
+        None => librqbit::IpRanges::default(),
+    };
+    Ok((ranges, list.len(), list.bad_lines))
+}
+
+/// True when the two settings differ only in what is blocked, which a running engine
+/// can take without a restart.
+pub(crate) fn only_blocking_differs(a: &NetworkSettings, b: &NetworkSettings) -> bool {
+    let strip = |s: &NetworkSettings| NetworkSettings {
+        blocklist: None,
+        banned: Vec::new(),
+        ..s.clone()
+    };
+    a != b && strip(a) == strip(b)
+}
 
 /// Reads the chosen block list, adds the banned peers and writes the result where the
 /// engine reads it. No file and no address for it when nothing is blocked.
@@ -522,6 +558,7 @@ mod tests {
         let s = NetworkSettings {
             port: free,
             upnp: false,
+            natpmp: false,
             dht: false,
             local_discovery: false,
             proxy: ProxySettings {
@@ -577,5 +614,18 @@ mod tests {
         add.abort();
         session.stop().await;
         let _ = std::fs::remove_dir_all(std::env::temp_dir().join(format!("rusttorrent-proxy-{}", std::process::id())));
+    }
+
+    #[test]
+    fn only_blocking_changes_skip_the_restart() {
+        let a = NetworkSettings::default();
+        let mut b = a.clone();
+        assert!(!only_blocking_differs(&a, &b));
+        b.banned.push("1.2.3.4".into());
+        assert!(only_blocking_differs(&a, &b));
+        b.blocklist = Some("/tmp/list.txt".into());
+        assert!(only_blocking_differs(&a, &b));
+        b.port += 1;
+        assert!(!only_blocking_differs(&a, &b));
     }
 }

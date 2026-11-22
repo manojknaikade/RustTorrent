@@ -101,7 +101,7 @@ impl Worker {
             return false;
         };
         let bytes = if torrent.is_empty() {
-            let mut trackers: Vec<String> = handle.shared().trackers.iter().map(|u| u.to_string()).collect();
+            let mut trackers: Vec<String> = handle.shared().trackers().iter().map(|u| u.to_string()).collect();
             trackers.sort();
             crate::make::from_info(&info, &trackers)
         } else {

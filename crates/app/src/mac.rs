@@ -71,6 +71,7 @@ define_class!(
                 // 0x4755524C is 'GURL', the "get URL" event class and id.
                 let manager: *mut AnyObject = msg_send![class!(NSAppleEventManager), sharedAppleEventManager];
                 let _: () = msg_send![manager, setEventHandler: self, andSelector: sel!(handleGetURL:withReplyEvent:), forEventClass: 0x4755524Cu32, andEventID: 0x4755524Cu32];
+                crate::scripting::install(manager);
 
                 let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
                 let delegate: *mut AnyObject = msg_send![app, delegate];

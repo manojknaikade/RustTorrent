@@ -12,6 +12,7 @@ pub struct Form {
     fixed_port: bool,
     port: u16,
     upnp: bool,
+    natpmp: bool,
     dht: bool,
     local_discovery: bool,
     utp: bool,
@@ -28,6 +29,7 @@ impl Form {
             fixed_port: s.port != 0,
             port: if s.port == 0 { 51413 } else { s.port },
             upnp: s.upnp,
+            natpmp: s.natpmp,
             dht: s.dht,
             local_discovery: s.local_discovery,
             utp: s.utp,
@@ -46,6 +48,7 @@ impl Form {
         NetworkSettings {
             port: if self.fixed_port { self.port } else { 0 },
             upnp: self.upnp,
+            natpmp: self.natpmp,
             dht: self.dht,
             local_discovery: self.local_discovery,
             utp: self.utp,
@@ -132,6 +135,7 @@ fn summary(form: &Form, snap: &Snapshot) -> String {
     }
     let off: Vec<&str> = [
         (form.upnp, "UPnP"),
+        (form.natpmp, "NAT-PMP"),
         (form.dht, "DHT"),
         (form.local_discovery, "local peers"),
     ]
@@ -169,7 +173,21 @@ fn body(ui: &mut egui::Ui, form: &mut Form, snap: &Snapshot) {
 
     ui.add_space(6.0);
     ui.checkbox(&mut form.upnp, "Ask the router to forward the port (UPnP)");
-    if !form.upnp {
+    ui.add_enabled(
+        !form.proxy.enabled,
+        egui::Checkbox::new(&mut form.natpmp, "Also ask over NAT-PMP"),
+    );
+    if form.proxy.enabled {
+        note(
+            ui,
+            "Not used while the proxy is on: peers reach the proxy, not this computer.",
+        );
+    } else if let Some(text) = snap.network.natpmp.as_deref().filter(|_| form.natpmp) {
+        note(ui, text);
+    } else if form.natpmp {
+        note(ui, "For Apple and other routers, and VPNs, that do not speak UPnP.");
+    }
+    if !form.upnp && !form.natpmp {
         note(
             ui,
             "Off: peers on the internet cannot connect to you unless you forward the port on the \

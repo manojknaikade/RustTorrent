@@ -15,6 +15,7 @@ cp target/release/rusttorrent "$APP/Contents/MacOS/rusttorrent"
 # The icon is drawn in assets/icon.svg; see the README for how the .icns is made from it.
 mkdir -p "$APP/Contents/Resources"
 cp assets/RustTorrent.icns "$APP/Contents/Resources/RustTorrent.icns"
+cp assets/RustTorrent.sdef "$APP/Contents/Resources/RustTorrent.sdef"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -32,6 +33,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>LSMinimumSystemVersion</key><string>11.0</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>NSAppleScriptEnabled</key><true/>
+  <key>OSAScriptingDefinition</key><string>RustTorrent.sdef</string>
   <key>CFBundleURLTypes</key>
   <array>
     <dict>

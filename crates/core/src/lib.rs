@@ -18,6 +18,7 @@ mod logfile;
 pub mod make;
 pub mod manage;
 pub mod model;
+pub mod natpmp;
 pub mod net;
 pub mod network;
 pub mod priority;
@@ -110,6 +111,14 @@ impl Core {
         self.shared.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
+    /// A handle that other threads, such as AppleScript's, can keep to reach the engine.
+    pub fn remote(&self) -> Remote {
+        Remote {
+            tx: self.tx.clone(),
+            shared: self.shared.clone(),
+        }
+    }
+
     /// Saves everything and stops the engine. Waits a few seconds at most.
     pub fn shutdown(&mut self) {
         self.send(Command::Shutdown);
@@ -122,6 +131,23 @@ impl Core {
                 let _ = thread.join();
             }
         }
+    }
+}
+
+/// Sends commands and reads the snapshot, like [`Core`], but cannot stop the engine.
+#[derive(Clone)]
+pub struct Remote {
+    tx: tokio::sync::mpsc::UnboundedSender<Command>,
+    shared: Shared,
+}
+
+impl Remote {
+    pub fn send(&self, command: Command) {
+        let _ = self.tx.send(command);
+    }
+
+    pub fn snapshot(&self) -> Arc<Snapshot> {
+        self.shared.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 }
 
