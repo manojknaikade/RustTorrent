@@ -165,6 +165,9 @@ pub struct Record {
     /// Name, size and progress as last seen, so the list can be shown while the engine
     /// is not running.
     pub name: String,
+    /// A name chosen by the user, shown instead of the torrent's own. Only the list
+    /// shows it: the files on disk keep their names.
+    pub label: Option<String>,
     pub total: u64,
     pub done: u64,
     pub finished: bool,
@@ -384,6 +387,7 @@ mod tests {
                 queue_pos: 3,
                 ratio_limit_pct: Some(200),
                 name: "debian.iso".into(),
+                label: Some("Debian 12".into()),
                 total: 100,
                 done: 60,
                 finished: false,

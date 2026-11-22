@@ -66,8 +66,9 @@ opt-level = "s"
 
 # librqbit 9.1.0 with recheck, reannounce, file order and per-torrent speed limits added,
 # regex-lite in place of regex, a rustls feature with no crypto library built in, and a
-# blocklist that can be replaced while the session runs, and trackers that can be edited.
+# blocklist that can be replaced while the session runs, trackers that can be edited, and
+# web seeds (BEP 19).
 # Each change is offered upstream on its own; this branch of the fork joins them.
 # https://github.com/manojknaikade/rqbit/tree/rusttorrent
 [patch.crates-io]
-librqbit = { git = "https://github.com/manojknaikade/rqbit", rev = "8a624710a940adbda2e32c7a0acb88cf62075f60" }
+librqbit = { git = "https://github.com/manojknaikade/rqbit", rev = "25d7bb44b7881df0bbc8857ccfffabd726c34206" }

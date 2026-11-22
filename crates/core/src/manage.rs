@@ -118,9 +118,9 @@ pub(crate) fn data_folder(bytes: &[u8], parent: &Path) -> PathBuf {
 /// A magnet link for a torrent in the list: its info-hash, name and trackers.
 pub fn magnet_link(t: &crate::model::TorrentView) -> String {
     let mut link = format!("magnet:?xt=urn:btih:{}", t.key);
-    if !t.name.is_empty() && t.name != t.key {
+    if !t.own_name.is_empty() && t.own_name != t.key {
         link.push_str("&dn=");
-        link.push_str(&escape(&t.name));
+        link.push_str(&escape(&t.own_name));
     }
     for tracker in t.trackers.iter() {
         link.push_str("&tr=");
@@ -438,6 +438,7 @@ mod tests {
         let t = crate::model::TorrentView {
             key: "0123456789abcdef0123456789abcdef01234567".into(),
             name: "debian 13.iso".into(),
+            own_name: "debian 13.iso".into(),
             state: crate::model::State::Seeding,
             error: None,
             total: 0,

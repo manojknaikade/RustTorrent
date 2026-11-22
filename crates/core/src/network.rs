@@ -279,15 +279,27 @@ pub(crate) async fn reload_blocklist(
     Ok((ranges, list.len(), list.bad_lines))
 }
 
-/// True when the two settings differ only in what is blocked, which a running engine
-/// can take without a restart.
-pub(crate) fn only_blocking_differs(a: &NetworkSettings, b: &NetworkSettings) -> bool {
+/// True when the two settings differ only in what a running engine can take without a
+/// restart: what is blocked and whether NAT-PMP maps the port.
+pub(crate) fn only_live_differs(a: &NetworkSettings, b: &NetworkSettings) -> bool {
     let strip = |s: &NetworkSettings| NetworkSettings {
+        natpmp: false,
+        ..blocking_stripped(s)
+    };
+    a != b && strip(a) == strip(b)
+}
+
+/// True when what is blocked differs.
+pub(crate) fn blocking_differs(a: &NetworkSettings, b: &NetworkSettings) -> bool {
+    a.blocklist != b.blocklist || a.banned != b.banned
+}
+
+fn blocking_stripped(s: &NetworkSettings) -> NetworkSettings {
+    NetworkSettings {
         blocklist: None,
         banned: Vec::new(),
         ..s.clone()
-    };
-    a != b && strip(a) == strip(b)
+    }
 }
 
 /// Reads the chosen block list, adds the banned peers and writes the result where the
@@ -620,12 +632,25 @@ mod tests {
     fn only_blocking_changes_skip_the_restart() {
         let a = NetworkSettings::default();
         let mut b = a.clone();
-        assert!(!only_blocking_differs(&a, &b));
+        assert!(!only_live_differs(&a, &b));
         b.banned.push("1.2.3.4".into());
-        assert!(only_blocking_differs(&a, &b));
+        assert!(only_live_differs(&a, &b) && blocking_differs(&a, &b));
         b.blocklist = Some("/tmp/list.txt".into());
-        assert!(only_blocking_differs(&a, &b));
+        assert!(only_live_differs(&a, &b));
         b.port += 1;
-        assert!(!only_blocking_differs(&a, &b));
+        assert!(!only_live_differs(&a, &b));
+    }
+
+    #[test]
+    fn natpmp_changes_skip_the_restart() {
+        let a = NetworkSettings::default();
+        let mut b = a.clone();
+        b.natpmp = !a.natpmp;
+        assert!(only_live_differs(&a, &b));
+        assert!(!blocking_differs(&a, &b));
+        b.banned.push("1.2.3.4".into());
+        assert!(only_live_differs(&a, &b));
+        b.utp = !a.utp;
+        assert!(!only_live_differs(&a, &b));
     }
 }

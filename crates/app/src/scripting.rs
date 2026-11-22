@@ -164,7 +164,7 @@ fn chosen(event: &AnyObject, reply: &AnyObject) -> Option<Vec<String>> {
         let found: Vec<String> = snap
             .torrents
             .iter()
-            .filter(|t| &t.key == want || t.name.eq_ignore_ascii_case(want))
+            .filter(|t| &t.key == want || t.name.eq_ignore_ascii_case(want) || t.own_name.eq_ignore_ascii_case(want))
             .map(|t| t.key.clone())
             .collect();
         if found.is_empty() {

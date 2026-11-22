@@ -68,7 +68,10 @@ pub struct PeerView {
 pub struct TorrentView {
     /// The torrent's info-hash in hex, or `pending:<n>` while details are being fetched.
     pub key: String,
+    /// The name the list shows: the user's own if they gave one, else the torrent's.
     pub name: String,
+    /// The torrent's own name, which its files and folder on disk are named by.
+    pub own_name: String,
     pub state: State,
     pub error: Option<String>,
     pub total: u64,
@@ -114,6 +117,7 @@ impl TorrentView {
         Self {
             key: key.into(),
             name: "n".into(),
+            own_name: "n".into(),
             state,
             error: None,
             total,

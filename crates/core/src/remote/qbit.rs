@@ -261,7 +261,7 @@ fn eta(t: &TorrentView) -> u64 {
 fn save_path(t: &TorrentView) -> String {
     let path = Path::new(&t.save_path);
     match (t.files.len(), path.file_name(), path.parent()) {
-        (n, Some(last), Some(parent)) if n != 1 && last == t.name.as_str() => parent.to_string_lossy().into_owned(),
+        (n, Some(last), Some(parent)) if n != 1 && last == t.own_name.as_str() => parent.to_string_lossy().into_owned(),
         _ => t.save_path.clone(),
     }
 }
@@ -864,6 +864,13 @@ fn act(name: &str, params: &Params, snap: &Snapshot) -> Option<Answer> {
                 "",
             ))
         }
+        "torrents/rename" => {
+            let Some(t) = one(params, snap) else {
+                return Some(Err((404, "Torrent hash was not found")));
+            };
+            let name = params.get("name").unwrap_or("").to_owned();
+            Ok((vec![Command::Rename { key: t.key.clone(), name }], ""))
+        }
         "torrents/setLocation" => Err((403, "Folders can only be changed at the computer.")),
         "transfer/setDownloadLimit" | "transfer/setUploadLimit" => {
             let Some(limit) = params.number("limit") else {
@@ -1035,7 +1042,8 @@ Content-Type: application/x-bittorrent\r\n\r\nd1:a\r\n1:be\r\n--XyZ--\r\n";
             len: 1,
         };
         let mut t = TorrentView::sample("k", State::Downloading, 0, 10);
-        t.name = "Show".into();
+        t.name = "My show".into();
+        t.own_name = "Show".into();
         // Several files in a folder of the torrent's name: saved in the folder above.
         t.save_path = "/d/Show".into();
         t.files = std::sync::Arc::new(vec![file("a.mkv"), file("b.mkv")]);
@@ -1046,7 +1054,7 @@ Content-Type: application/x-bittorrent\r\n\r\nd1:a\r\n1:be\r\n--XyZ--\r\n";
         assert_eq!(save_path(&t), "/d");
         assert_eq!(content_path(&t), PathBuf::from("/d"));
         // One file.
-        t.name = "a.mkv".into();
+        t.own_name = "a.mkv".into();
         t.files = std::sync::Arc::new(vec![file("a.mkv")]);
         assert_eq!(save_path(&t), "/d");
         assert_eq!(content_path(&t), PathBuf::from("/d/a.mkv"));

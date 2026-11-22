@@ -172,6 +172,9 @@ pub enum Command {
     /// Replace the trackers of a torrent. Lines that are not web or UDP addresses are
     /// left out.
     SetTrackers { key: String, trackers: Vec<String> },
+    /// Show a torrent under a name of the user's choosing. An empty name goes back to
+    /// the torrent's own.
+    Rename { key: String, name: String },
     /// Speed limits in KiB/s for these torrents alone, on top of the global ones.
     /// 0 means no limit of its own.
     SetTorrentLimits {
@@ -227,6 +230,17 @@ const FEED_MAX_BYTES: usize = 8 * 1024 * 1024;
 const KEEP_SEEN: usize = 2000;
 /// How long to wait before trying again to start the engine.
 const RETRY_EVERY: Duration = Duration::from_secs(5);
+/// The longest name a torrent can be given, in characters.
+const MAX_LABEL: usize = 255;
+
+/// The name the list shows: the user's own, else the torrent's, else its hash.
+fn display_name(record: &Record, key: &str) -> String {
+    match (&record.label, record.name.is_empty()) {
+        (Some(label), _) => label.clone(),
+        (None, false) => record.name.clone(),
+        (None, true) => key.to_owned(),
+    }
+}
 
 struct Pending {
     id: u64,
@@ -741,22 +755,7 @@ impl Worker {
             port: session.listen_addr().map(|a| a.port()),
             ..prepared.status
         };
-        // Not through the proxy: peers reach the proxy, not this computer.
-        if network.natpmp && !network.proxy.enabled {
-            if let Some(port) = status.port {
-                let bind_v4 = bind.as_deref().and_then(|name| {
-                    self.interfaces
-                        .iter()
-                        .find(|i| i.name == name)
-                        .and_then(|i| i.addrs.iter().find_map(|a| a.parse::<std::net::Ipv4Addr>().ok()))
-                        .map(|ip| (name.to_owned(), ip))
-                });
-                // With a chosen interface that has no IPv4 address, NAT-PMP cannot be used.
-                if bind.is_none() || bind_v4.is_some() {
-                    self.natpmp = Some(crate::natpmp::Mapper::start(port, network.utp, bind_v4));
-                }
-            }
-        }
+        self.start_natpmp(&network, status.port, bind.as_deref());
         self.net_used = Some((network, status));
         self.session = Some(session);
         self.bound = bind;
@@ -773,6 +772,40 @@ impl Worker {
 
     /// Gives the running engine the new block list and banned peers. Peers now blocked
     /// are disconnected. When the list cannot be read the engine keeps the old one.
+    /// Starts mapping the port with NAT-PMP when the settings ask for it.
+    fn start_natpmp(&mut self, network: &crate::network::NetworkSettings, port: Option<u16>, bind: Option<&str>) {
+        // Not through the proxy: peers reach the proxy, not this computer.
+        if !network.natpmp || network.proxy.enabled {
+            return;
+        }
+        let Some(port) = port else { return };
+        let bind_v4 = bind.and_then(|name| {
+            self.interfaces
+                .iter()
+                .find(|i| i.name == name)
+                .and_then(|i| i.addrs.iter().find_map(|a| a.parse::<std::net::Ipv4Addr>().ok()))
+                .map(|ip| (name.to_owned(), ip))
+        });
+        // With a chosen interface that has no IPv4 address, NAT-PMP cannot be used.
+        if bind.is_none() || bind_v4.is_some() {
+            self.natpmp = Some(crate::natpmp::Mapper::start(port, network.utp, bind_v4));
+        }
+    }
+
+    /// Turns NAT-PMP on or off in the running engine, without a restart.
+    async fn apply_natpmp(&mut self) {
+        let network = self.store.data.settings.network.clone();
+        if let Some(mapper) = self.natpmp.take() {
+            mapper.stop().await;
+        }
+        let port = self.net_used.as_ref().and_then(|(_, s)| s.port);
+        let bind = self.bound.clone();
+        self.start_natpmp(&network, port, bind.as_deref());
+        if let Some((used, _)) = &mut self.net_used {
+            used.natpmp = network.natpmp;
+        }
+    }
+
     async fn reload_blocklist(&mut self) {
         let Some(session) = self.session.clone() else { return };
         let network = self.store.data.settings.network.clone();
@@ -837,10 +870,16 @@ impl Worker {
             // The engine takes the number of peers per torrent only when it starts.
             let peers = self.session_peers == self.store.data.settings.limits.peers_per_torrent;
             let wanted_net = &self.store.data.settings.network;
-            let reload = (self.net_used.as_ref())
-                .is_some_and(|(used, _)| crate::network::only_blocking_differs(used, wanted_net));
-            if reload {
-                self.reload_blocklist().await;
+            let live = (self.net_used.as_ref())
+                .filter(|(used, _)| crate::network::only_live_differs(used, wanted_net))
+                .map(|(used, _)| (used.natpmp != wanted_net.natpmp, crate::network::blocking_differs(used, wanted_net)));
+            if let Some((natpmp, blocking)) = live {
+                if natpmp {
+                    self.apply_natpmp().await;
+                }
+                if blocking {
+                    self.reload_blocklist().await;
+                }
             }
             let changed = self.net_used.as_ref().map(|(n, _)| n) != Some(&self.store.data.settings.network);
             if self.bound == wanted && up && !replaced && peers && !changed {
@@ -909,11 +948,8 @@ impl Worker {
         };
         TorrentView {
             key: key.to_owned(),
-            name: if record.name.is_empty() {
-                key.to_owned()
-            } else {
-                record.name.clone()
-            },
+            name: display_name(record, key),
+            own_name: record.name.clone(),
             state,
             error: None,
             total: record.total,
@@ -1350,6 +1386,13 @@ impl Worker {
                 }
             }
             Command::SetTrackers { key, trackers } => self.set_trackers(&key, &trackers).await,
+            Command::Rename { key, name } => {
+                let name: String = name.trim().chars().filter(|c| !c.is_control()).take(MAX_LABEL).collect();
+                if let Some(record) = self.store.data.torrents.get_mut(&key) {
+                    record.label = (!name.is_empty()).then_some(name);
+                    self.save();
+                }
+            }
             Command::SetTorrentLimits { keys, down_kib, up_kib } => {
                 for key in &keys {
                     if let Some(record) = self.store.data.torrents.get_mut(key) {
@@ -1461,7 +1504,7 @@ impl Worker {
                 Ok(ip) => {
                     self.notice(
                         format!(
-                            "Banned {ip}. The engine restarts to apply this, so transfers pause for a few seconds."
+                            "Banned {ip}. Connections from it are refused from now on."
                         ),
                         false,
                     );
@@ -1962,11 +2005,8 @@ impl Worker {
                 let record = &self.store.data.torrents[&key];
                 torrents.push(TorrentView {
                     // The first pass above copied the name into the record once it was known.
-                    name: if record.name.is_empty() {
-                        key.clone()
-                    } else {
-                        record.name.clone()
-                    },
+                    name: display_name(record, &key),
+                    own_name: record.name.clone(),
                     state,
                     error: stats.error.clone(),
                     total: stats.total_bytes,
@@ -2014,6 +2054,7 @@ impl Worker {
             torrents.push(TorrentView {
                 key: format!("pending:{}", p.id),
                 name: p.label.clone(),
+                own_name: p.label.clone(),
                 state: match (blocked, p.paused) {
                     (true, true) => State::Paused,
                     (true, false) => State::Blocked,

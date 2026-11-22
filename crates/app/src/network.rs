@@ -152,7 +152,7 @@ fn summary(form: &Form, snap: &Snapshot) -> String {
 fn body(ui: &mut egui::Ui, form: &mut Form, snap: &Snapshot) {
     note(
         ui,
-        "Changes here restart the torrent engine, so transfers pause for a few seconds.",
+        "Most changes here restart the torrent engine, so transfers pause for a few seconds. NAT-PMP, the block list and banned peers change without a restart.",
     );
     ui.add_space(4.0);
     ui.horizontal(|ui| {

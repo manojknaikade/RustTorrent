@@ -272,6 +272,8 @@ pub struct App {
     play: Option<(String, usize, bool, std::time::Instant)>,
     /// The tracker list being edited: torrent and the text, one tracker per line.
     tracker_edit: Option<(String, String)>,
+    /// A torrent being renamed: its key, the name being typed and the torrent's own name.
+    rename: Option<(String, String, String)>,
 }
 
 /// What the sidebar shows next to each status, category and tag.
@@ -420,6 +422,7 @@ impl App {
             side: Side::default(),
             play: None,
             tracker_edit: None,
+            rename: None,
         }
     }
 
@@ -1081,6 +1084,8 @@ impl App {
         let mut ask_name: Option<(Vec<String>, bool)> = None;
         // Set when the menu asks to save a torrent's file: its key and name.
         let mut save_file: Option<(String, String)> = None;
+        // Set when the menu asks to rename a torrent.
+        let mut ask_rename: Option<(String, String, String)> = None;
         let mut move_to: Option<(Vec<String>, std::path::PathBuf)> = None;
         let recent = self.snap.settings.recent_dirs.clone();
         let (categories, tags) = names_in_use(&snap);
@@ -1222,6 +1227,16 @@ impl App {
                         }
                         if ui.button(REVEAL).clicked() {
                             reveal(&t.save_path);
+                            ui.close();
+                        }
+                        if key.len() == 1
+                            && !t.is_pending()
+                            && ui
+                                .button("Rename…")
+                                .on_hover_text("Show it under another name. Its files keep their names.")
+                                .clicked()
+                        {
+                            ask_rename = Some((t.key.clone(), t.name.clone(), t.own_name.clone()));
                             ui.close();
                         }
                         ui.separator();
@@ -1440,6 +1455,9 @@ impl App {
             Some((Command::Remove { keys, .. }, true)) => self.ask_remove(keys),
             Some((command, _)) => self.core.send(command),
             None => {}
+        }
+        if ask_rename.is_some() {
+            self.rename = ask_rename;
         }
         if let Some((keys, tag)) = ask_name {
             self.name = Some(NameDialog {
@@ -2071,6 +2089,48 @@ impl App {
             self.extras.open_log();
         }
         self.extras.windows(ctx, &self.snap);
+
+        if let Some((key, text, own)) = &mut self.rename {
+            let (mut close, mut save) = (false, false);
+            let response = egui::Modal::new(egui::Id::unique("rename")).show(ctx, |ui| {
+                ui.set_width(360.0);
+                ui.heading("Rename");
+                ui.add_space(4.0);
+                ui.label("The name the list shows. The files on disk keep their names.");
+                let r = ui.add(egui::TextEdit::singleline(text).desired_width(f32::INFINITY));
+                if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    save = true;
+                } else if !r.has_focus() {
+                    r.request_focus();
+                }
+                ui.add_space(6.0);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button(RichText::new("Save").strong()).clicked() {
+                        save = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        close = true;
+                    }
+                    if !own.is_empty()
+                        && ui
+                            .button("Use its own name")
+                            .on_hover_text(own.clone())
+                            .clicked()
+                    {
+                        text.clear();
+                        save = true;
+                    }
+                });
+            });
+            if save {
+                // The torrent's own name typed back means no name of the user's.
+                let name = if text.trim() == own.as_str() { String::new() } else { text.clone() };
+                self.core.send(Command::Rename { key: key.clone(), name });
+            }
+            if save || close || response.should_close() {
+                self.rename = None;
+            }
+        }
 
         if let Some(dialog) = &mut self.name {
             let (mut close, mut save) = (false, false);
