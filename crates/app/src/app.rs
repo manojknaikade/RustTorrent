@@ -961,10 +961,13 @@ impl App {
         });
         if n > 1 || t.done < t.total {
             ui.label(
-                RichText::new(
+                RichText::new(if t.in_order {
                     "Downloads in order: high-priority files first, then normal, then low, by name within each, \
-                     each file from its start to its end.",
-                )
+                     each file from its start to its end."
+                } else {
+                    "Downloads out of order: pieces of high-priority files first, then normal, then low, \
+                     each group in random order."
+                })
                 .small()
                 .weak(),
             );
@@ -1243,13 +1246,26 @@ impl App {
                             ui.close();
                         }
                         ui.separator();
-                        // The engine has no other order, so this cannot be switched off.
-                        let mut in_order = true;
-                        ui.add_enabled(false, egui::Checkbox::new(&mut in_order, "Download in order"))
-                            .on_disabled_hover_text(
-                                "Always on. Files download one after another by name, each from its \
-                                 start to its end, so a video can be played while it downloads.",
-                            );
+                        let mut in_order = t.in_order;
+                        if ui
+                            .checkbox(&mut in_order, "Download in order")
+                            .on_hover_text(
+                                "On: files download one after another, each from its start to its \
+                                 end, so a video can be played while it downloads.\nOff: pieces \
+                                 come in random order, which shares them better when few peers \
+                                 have the whole torrent.",
+                            )
+                            .changed()
+                        {
+                            action = Some((
+                                Command::SetInOrder {
+                                    keys: key.clone(),
+                                    in_order: Some(in_order),
+                                },
+                                false,
+                            ));
+                            ui.close();
+                        }
                         ui.menu_button("Queue", |ui| {
                             for (name, how) in [
                                 ("Move to top", Move::Top),
@@ -2537,9 +2553,16 @@ impl App {
         }
         let close = ctx.input(|i| i.viewport().close_requested());
         #[cfg(target_os = "macos")]
-        let close = if close && !self.quit_ok && !self.extras.closing() && crate::menu_bar::hides_on_close(&self.snap) {
+        // The close button keeps the app running: it hides the window in the menu bar when
+        // that icon is on, and otherwise minimizes it to the Dock. Quitting is Cmd-Q or the
+        // menu, which ends the app without asking the window to close first.
+        let close = if close && !self.quit_ok && !self.extras.closing() {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            crate::menu_bar::hide(&ctx);
+            if crate::menu_bar::hides_on_close(&self.snap) {
+                crate::menu_bar::hide(&ctx);
+            } else {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            }
             false
         } else {
             close

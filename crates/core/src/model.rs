@@ -108,6 +108,9 @@ pub struct TorrentView {
     pub up_limit_kib: u32,
     /// Files set to high or low priority.
     pub priorities: crate::priority::FilePriorities,
+    /// Downloads each file from its start to its end, so a video can be played early.
+    /// Off picks pieces at random, which shares them better in a thin swarm.
+    pub in_order: bool,
 }
 
 impl TorrentView {
@@ -144,6 +147,7 @@ impl TorrentView {
             down_limit_kib: 0,
             up_limit_kib: 0,
             priorities: Default::default(),
+            in_order: true,
         }
     }
 

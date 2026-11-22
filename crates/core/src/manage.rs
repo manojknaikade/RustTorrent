@@ -465,6 +465,7 @@ mod tests {
             down_limit_kib: 0,
             up_limit_kib: 0,
             priorities: Default::default(),
+            in_order: true,
         };
         assert_eq!(
             magnet_link(&t),

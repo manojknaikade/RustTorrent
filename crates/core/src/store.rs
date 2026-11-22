@@ -181,6 +181,8 @@ pub struct Record {
     pub up_limit_kib: u32,
     /// Files set to high or low priority.
     pub priorities: crate::priority::FilePriorities,
+    /// Picks pieces at random instead of downloading each file from start to end.
+    pub random_order: bool,
     /// A move of its data to another folder that has not ended yet.
     pub moving: Option<crate::relocate::MoveNote>,
     /// Where the data goes once the download finishes, while it is kept in the folder
@@ -404,6 +406,7 @@ mod tests {
                     high: vec![1],
                     low: vec![0, 2],
                 },
+                random_order: true,
                 moving: Some(crate::relocate::MoveNote {
                     from: "/a".into(),
                     to: "/b".into(),

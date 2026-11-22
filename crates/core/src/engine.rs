@@ -194,6 +194,12 @@ pub enum Command {
         files: Vec<usize>,
         priority: crate::priority::Priority,
     },
+    /// Download these torrents in order (each file from start to end) or not (pieces at
+    /// random). `None` switches each one to the other way.
+    SetInOrder {
+        keys: Vec<String>,
+        in_order: Option<bool>,
+    },
     /// Move the data of these torrents to another folder and keep seeding from there.
     MoveData {
         keys: Vec<String>,
@@ -992,6 +998,7 @@ impl Worker {
             down_limit_kib: record.down_limit_kib,
             up_limit_kib: record.up_limit_kib,
             priorities: record.priorities.clone(),
+            in_order: !record.random_order,
         }
     }
 
@@ -1431,6 +1438,20 @@ impl Worker {
                 }
                 self.save();
             }
+            Command::SetInOrder { keys, in_order } => {
+                for key in &keys {
+                    if let Some(record) = self.store.data.torrents.get_mut(key) {
+                        record.random_order = match in_order {
+                            Some(on) => !on,
+                            None => !record.random_order,
+                        };
+                    }
+                    if let Some(handle) = self.find(key) {
+                        self.sync_extras(key, &handle);
+                    }
+                }
+                self.save();
+            }
             Command::MoveData { keys, dir } => {
                 self.store.data.settings.remember_dir(&dir);
                 self.save();
@@ -1766,7 +1787,7 @@ impl Worker {
         }
     }
 
-    /// Gives the engine this torrent's own speed limits and file order. The engine keeps
+    /// Gives the engine this torrent's own speed limits, file order and piece order. The engine keeps
     /// neither across a restart, so this runs every second and changes only what differs.
     fn sync_extras(&mut self, key: &str, handle: &Handle) {
         let Some(record) = self.store.data.torrents.get(key) else {
@@ -1780,6 +1801,10 @@ impl Worker {
             handle.set_ratelimits(wanted);
         }
         let Some(meta) = self.meta.get(key) else { return };
+        let random = record.random_order.then(|| record.priorities.ranks(meta.files.len()));
+        if handle.random_order() != random {
+            handle.update_random_order(random);
+        }
         let order = record.priorities.file_order(&meta.files);
         if handle.file_order() != order {
             if let Err(e) = handle.update_file_order(order) {
@@ -2053,6 +2078,7 @@ impl Worker {
                     down_limit_kib: record.down_limit_kib,
                     up_limit_kib: record.up_limit_kib,
                     priorities: record.priorities.clone(),
+                    in_order: !record.random_order,
                     key,
                 });
             }
@@ -2103,6 +2129,7 @@ impl Worker {
                 down_limit_kib: 0,
                 up_limit_kib: 0,
                 priorities: Default::default(),
+                in_order: true,
             });
         }
 

@@ -142,6 +142,7 @@ impl Extras {
         if let Some(text) = self.power_error.clone() {
             let mut open = true;
             egui::Window::new("All downloads finished")
+                .id(egui::Id::unique(POWER_ID))
                 .open(&mut open)
                 .collapsible(false)
                 .resizable(false)
@@ -167,6 +168,7 @@ impl Extras {
             "The computer"
         };
         egui::Window::new("All downloads finished")
+            .id(egui::Id::unique(COUNTDOWN_ID))
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
@@ -185,10 +187,42 @@ impl Extras {
 
     /// The statistics and log windows, when open.
     pub fn windows(&mut self, ctx: &egui::Context, snap: &Snapshot) {
+        // Esc closes the window on top, unless a dialog or menu is open over it.
+        let open = [
+            (POWER_ID, self.power_error.is_some()),
+            (COUNTDOWN_ID, self.countdown.is_some()),
+            (STATS_ID, self.stats),
+            (LOG_ID, self.log.is_some()),
+        ];
+        let esc = ctx.input(|i| i.key_pressed(egui::Key::Escape))
+            && ctx.memory(|m| m.top_modal_layer().is_none())
+            && !egui::Popup::is_any_open(ctx);
+        if esc {
+            let top = ctx.memory(|m| {
+                m.layer_ids()
+                    .filter(|l| open.iter().any(|&(id, on)| on && l.id == egui::Id::unique(id)))
+                    .last()
+            });
+            // A window not drawn yet has no layer; close the newest of those then.
+            let top = top.map(|l| l.id).or_else(|| {
+                open.iter()
+                    .rev()
+                    .find(|(_, on)| *on)
+                    .map(|(id, _)| egui::Id::unique(*id))
+            });
+            match top {
+                Some(id) if id == egui::Id::unique(POWER_ID) => self.power_error = None,
+                Some(id) if id == egui::Id::unique(COUNTDOWN_ID) => self.countdown = None,
+                Some(id) if id == egui::Id::unique(STATS_ID) => self.stats = false,
+                Some(id) if id == egui::Id::unique(LOG_ID) => self.log = None,
+                _ => {}
+            }
+        }
         self.power_window(ctx);
         let mut open_log = false;
         let mut stats = self.stats;
         egui::Window::new("Statistics")
+            .id(egui::Id::unique(STATS_ID))
             .open(&mut stats)
             .resizable(false)
             .collapsible(false)
@@ -232,6 +266,7 @@ impl Extras {
         if let Some(log) = &mut self.log {
             let mut open = true;
             egui::Window::new("Log")
+                .id(egui::Id::unique(LOG_ID))
                 .open(&mut open)
                 .default_size([680.0, 420.0])
                 .collapsible(false)
@@ -250,6 +285,11 @@ impl Extras {
         self.log = Some(LogView::read(path));
     }
 }
+
+const POWER_ID: &str = "power-error-window";
+const COUNTDOWN_ID: &str = "countdown-window";
+const STATS_ID: &str = "stats-window";
+const LOG_ID: &str = "log-window";
 
 /// The end of the app's log file.
 pub struct LogView {

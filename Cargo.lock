@@ -2561,7 +2561,7 @@ dependencies = [
 [[package]]
 name = "librqbit"
 version = "9.1.0"
-source = "git+https://github.com/manojknaikade/rqbit?rev=25d7bb44b7881df0bbc8857ccfffabd726c34206#25d7bb44b7881df0bbc8857ccfffabd726c34206"
+source = "git+https://github.com/manojknaikade/rqbit?rev=e67c631035cefdc824db4cbba90d18799fb3a08c#e67c631035cefdc824db4cbba90d18799fb3a08c"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2624,7 +2624,7 @@ dependencies = [
 [[package]]
 name = "librqbit-bencode"
 version = "9.1.0"
-source = "git+https://github.com/manojknaikade/rqbit?rev=25d7bb44b7881df0bbc8857ccfffabd726c34206#25d7bb44b7881df0bbc8857ccfffabd726c34206"
+source = "git+https://github.com/manojknaikade/rqbit?rev=e67c631035cefdc824db4cbba90d18799fb3a08c#e67c631035cefdc824db4cbba90d18799fb3a08c"
 dependencies = [
  "anyhow",
  "arrayvec",
@@ -2640,7 +2640,7 @@ dependencies = [
 [[package]]
 name = "librqbit-buffers"
 version = "9.1.0"
-source = "git+https://github.com/manojknaikade/rqbit?rev=25d7bb44b7881df0bbc8857ccfffabd726c34206#25d7bb44b7881df0bbc8857ccfffabd726c34206"
+source = "git+https://github.com/manojknaikade/rqbit?rev=e67c631035cefdc824db4cbba90d18799fb3a08c#e67c631035cefdc824db4cbba90d18799fb3a08c"
 dependencies = [
  "bytes",
  "librqbit-clone-to-owned",
@@ -2651,7 +2651,7 @@ dependencies = [
 [[package]]
 name = "librqbit-clone-to-owned"
 version = "9.1.0"
-source = "git+https://github.com/manojknaikade/rqbit?rev=25d7bb44b7881df0bbc8857ccfffabd726c34206#25d7bb44b7881df0bbc8857ccfffabd726c34206"
+source = "git+https://github.com/manojknaikade/rqbit?rev=e67c631035cefdc824db4cbba90d18799fb3a08c#e67c631035cefdc824db4cbba90d18799fb3a08c"
 dependencies = [
  "bytes",
 ]
@@ -2659,7 +2659,7 @@ dependencies = [
 [[package]]
 name = "librqbit-core"
 version = "9.1.0"
-source = "git+https://github.com/manojknaikade/rqbit?rev=25d7bb44b7881df0bbc8857ccfffabd726c34206#25d7bb44b7881df0bbc8857ccfffabd726c34206"
+source = "git+https://github.com/manojknaikade/rqbit?rev=e67c631035cefdc824db4cbba90d18799fb3a08c#e67c631035cefdc824db4cbba90d18799fb3a08c"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2688,7 +2688,7 @@ dependencies = [
 [[package]]
 name = "librqbit-dht"
 version = "9.1.0"
-source = "git+https://github.com/manojknaikade/rqbit?rev=25d7bb44b7881df0bbc8857ccfffabd726c34206#25d7bb44b7881df0bbc8857ccfffabd726c34206"
+source = "git+https://github.com/manojknaikade/rqbit?rev=e67c631035cefdc824db4cbba90d18799fb3a08c#e67c631035cefdc824db4cbba90d18799fb3a08c"
 dependencies = [
  "anyhow",
  "backon",
@@ -2735,7 +2735,7 @@ dependencies = [
 [[package]]
 name = "librqbit-lsd"
 version = "9.1.0"
-source = "git+https://github.com/manojknaikade/rqbit?rev=25d7bb44b7881df0bbc8857ccfffabd726c34206#25d7bb44b7881df0bbc8857ccfffabd726c34206"
+source = "git+https://github.com/manojknaikade/rqbit?rev=e67c631035cefdc824db4cbba90d18799fb3a08c#e67c631035cefdc824db4cbba90d18799fb3a08c"
 dependencies = [
  "anyhow",
  "atoi",
@@ -2754,7 +2754,7 @@ dependencies = [
 [[package]]
 name = "librqbit-peer-protocol"
 version = "9.1.0"
-source = "git+https://github.com/manojknaikade/rqbit?rev=25d7bb44b7881df0bbc8857ccfffabd726c34206#25d7bb44b7881df0bbc8857ccfffabd726c34206"
+source = "git+https://github.com/manojknaikade/rqbit?rev=e67c631035cefdc824db4cbba90d18799fb3a08c#e67c631035cefdc824db4cbba90d18799fb3a08c"
 dependencies = [
  "anyhow",
  "bitvec",
@@ -2774,7 +2774,7 @@ dependencies = [
 [[package]]
 name = "librqbit-sha1-wrapper"
 version = "9.1.0"
-source = "git+https://github.com/manojknaikade/rqbit?rev=25d7bb44b7881df0bbc8857ccfffabd726c34206#25d7bb44b7881df0bbc8857ccfffabd726c34206"
+source = "git+https://github.com/manojknaikade/rqbit?rev=e67c631035cefdc824db4cbba90d18799fb3a08c#e67c631035cefdc824db4cbba90d18799fb3a08c"
 dependencies = [
  "assert_cfg",
  "crypto-hash",
@@ -2783,7 +2783,7 @@ dependencies = [
 [[package]]
 name = "librqbit-tracker-comms"
 version = "9.1.0"
-source = "git+https://github.com/manojknaikade/rqbit?rev=25d7bb44b7881df0bbc8857ccfffabd726c34206#25d7bb44b7881df0bbc8857ccfffabd726c34206"
+source = "git+https://github.com/manojknaikade/rqbit?rev=e67c631035cefdc824db4cbba90d18799fb3a08c#e67c631035cefdc824db4cbba90d18799fb3a08c"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2811,7 +2811,7 @@ dependencies = [
 [[package]]
 name = "librqbit-upnp"
 version = "9.1.0"
-source = "git+https://github.com/manojknaikade/rqbit?rev=25d7bb44b7881df0bbc8857ccfffabd726c34206#25d7bb44b7881df0bbc8857ccfffabd726c34206"
+source = "git+https://github.com/manojknaikade/rqbit?rev=e67c631035cefdc824db4cbba90d18799fb3a08c#e67c631035cefdc824db4cbba90d18799fb3a08c"
 dependencies = [
  "anyhow",
  "bstr",
@@ -4379,7 +4379,7 @@ dependencies = [
 
 [[package]]
 name = "rusttorrent"
-version = "0.14.1"
+version = "0.15.0"
 dependencies = [
  "block2 0.6.2",
  "eframe",
@@ -4393,7 +4393,7 @@ dependencies = [
 
 [[package]]
 name = "rusttorrent-core"
-version = "0.14.1"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "chrono",

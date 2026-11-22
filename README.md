@@ -18,7 +18,7 @@ This puts RustTorrent in `/Applications`. Later versions arrive with `brew upgra
 
 To have magnet links in a browser and `.torrent` files in the Finder open in RustTorrent, open Settings in the app: it says which app macOS uses for them now, with a button to change it to RustTorrent. Some apps, such as qBittorrent, take them back each time they start; tick "Keep it that way" under the button and RustTorrent takes them back in turn, within 20 seconds.
 
-## What works in 0.14
+## What works in 0.15
 
 Adding
 
@@ -43,7 +43,7 @@ Managing
 - Add, edit and remove a torrent's trackers in its Trackers tab.
 - Web seeds: a torrent that lists web addresses for its files also downloads them over HTTP.
 - Make a `.torrent` from a file or folder: trackers in tiers, piece size, comment, private flag, and start seeding it straight away.
-- Downloads go in order: high-priority files first, then normal, then low, by name within each, each file from its start to its end (the first and last piece of a file come first, so a player can read its index). This is how the engine works, so it cannot be switched off.
+- Downloads go in order: high-priority files first, then normal, then low, by name within each, each file from its start to its end (the first and last piece of a file come first, so a player can read its index). Untick "Download in order" in a torrent's menu to fetch its pieces in random order instead, still most wanted files first; that spreads pieces better in a swarm with few seeds.
 - Play a file of a torrent, or copy a link to it, from the Files tab, even before it has finished: the parts being played are downloaded first. The link is served by the app on this computer only. Play opens VLC if it is installed, otherwise the default app for web links.
 - Disk guard: downloads are paused when their disk has less than a chosen amount free (1 GB by default; Settings), with a notice saying so.
 - Torrents carry on after the app is restarted. The app warns before quitting while downloads are running.
@@ -72,7 +72,9 @@ The window
 - Dark and light themes.
 - When a download finishes: a notification, and optionally a program is run (`%N` is the torrent's name, `%F` its folder). When all downloads finish, the app can quit, or put the computer to sleep or shut it down after a 30-second countdown that can be cancelled.
 - Keeps the Mac awake while transferring, if switched on.
-- An optional menu-bar icon (macOS): with it on, closing the window keeps downloads going, and the icon's menu shows the speeds and can pause, resume or quit.
+- Closing the window minimizes it to the Dock; downloads go on. Quit with Cmd-Q or the app menu.
+- An optional menu-bar icon (macOS): with it on, closing the window hides it and the Dock icon instead, and the icon's menu shows the speeds and can pause, resume or quit.
+- Esc closes every dialog and window: Settings, the statistics, the log and the rest.
 - VoiceOver names for the speed graphs, the piece strip and each row's state.
 
 Remote control

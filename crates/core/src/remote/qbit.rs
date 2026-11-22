@@ -332,7 +332,7 @@ fn torrent_json(t: &TorrentView, snap: &Snapshot) -> Value {
         "seeding_time": seeding.secs,
         "seeding_time_limit": own_limit(seeding.time_limit_min, 1.0),
         "inactive_seeding_time_limit": own_limit(seeding.idle_limit_min, 1.0),
-        "seq_dl": false,
+        "seq_dl": t.in_order,
         "size": t.total,
         "state": state(t),
         "super_seeding": false,
@@ -716,6 +716,13 @@ fn act(name: &str, params: &Params, snap: &Snapshot) -> Option<Answer> {
             vec![Command::SetForceStart {
                 keys: keys(),
                 on: params.yes("value"),
+            }],
+            "",
+        )),
+        "torrents/toggleSequentialDownload" => Ok((
+            vec![Command::SetInOrder {
+                keys: keys(),
+                in_order: None,
             }],
             "",
         )),

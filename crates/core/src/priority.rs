@@ -1,6 +1,7 @@
-//! File priority: high, normal or low. The engine downloads a torrent's files in one
-//! order, so priority is turned into that order: high files first, then normal ones, then
-//! low ones, each group sorted by name as the engine sorts files by default.
+//! File priority: high, normal or low. In order, the engine downloads a torrent's files
+//! one after another, so priority is turned into that order: high files first, then
+//! normal ones, then low ones, each group sorted by name as the engine sorts files by
+//! default. Out of order, priority is a rank: pieces of high files come first, at random.
 use serde::{Deserialize, Serialize};
 
 use crate::model::FileMeta;
@@ -61,6 +62,17 @@ impl FilePriorities {
 
     pub fn is_empty(&self) -> bool {
         self.high.is_empty() && self.low.is_empty()
+    }
+
+    /// Each file's rank for random piece order: high 0, normal 1, low 2.
+    pub fn ranks(&self, files: usize) -> Vec<u8> {
+        (0..files)
+            .map(|f| match self.get(f) {
+                Priority::High => 0,
+                Priority::Normal => 1,
+                Priority::Low => 2,
+            })
+            .collect()
     }
 
     /// The order to give the engine, or `None` for its own order (all files normal).
