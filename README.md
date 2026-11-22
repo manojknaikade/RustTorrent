@@ -4,7 +4,7 @@ A torrent client for the Mac, written in Rust. It can be compiled for Windows an
 
 It exists because Transmission hides a torrent's details in a small popup and qBittorrent is awkward to install on Apple Silicon. RustTorrent keeps everything about a torrent in the main window, and aims to stay small and fast: one binary, no web engine.
 
-Status: **0.13, early**. It installs with Homebrew and has been tested on real downloads. What it has and lacks next to qBittorrent is listed in [the comparison](docs/designs/qbittorrent-gap.md).
+Status: **0.14, early**. It installs with Homebrew and has been tested on real downloads. What it has and lacks next to qBittorrent is listed in [the comparison](docs/designs/qbittorrent-gap.md).
 
 ## Install
 
@@ -18,7 +18,7 @@ This puts RustTorrent in `/Applications`. Later versions arrive with `brew upgra
 
 To have magnet links in a browser open in RustTorrent, open Settings in the app: the last line says which app macOS uses for magnet links, with a button to change it to RustTorrent.
 
-## What works in 0.13
+## What works in 0.14
 
 Adding
 
@@ -39,6 +39,9 @@ Managing
 - A folder for unfinished downloads (Settings): torrents download there and are moved to the download folder when they finish. The finish notice and the finish program wait until the move is done. A torrent whose data is already in the download folder starts there.
 - Categories and tags, with filters in the sidebar. Make a category with + in the sidebar or by typing a name in the add dialog; right-click one in the sidebar to set its folder or delete it. A category can have its own download folder: a torrent put in that category is saved there, and its data is moved there if it was already downloading.
 - Copy a torrent's magnet link, info-hash or name. Save its `.torrent` file.
+- Rename a torrent (right-click menu). The new name is shown in the app; the files on disk keep theirs.
+- Add, edit and remove a torrent's trackers in its Trackers tab.
+- Web seeds: a torrent that lists web addresses for its files also downloads them over HTTP.
 - Make a `.torrent` from a file or folder: trackers in tiers, piece size, comment, private flag, and start seeding it straight away.
 - Downloads go in order: high-priority files first, then normal, then low, by name within each, each file from its start to its end (the first and last piece of a file come first, so a player can read its index). This is how the engine works, so it cannot be switched off.
 - Play a file of a torrent, or copy a link to it, from the Files tab, even before it has finished: the parts being played are downloaded first. The link is served by the app on this computer only. Play opens VLC if it is installed, otherwise the default app for web links.
@@ -55,10 +58,10 @@ Limits
 
 Network
 
-- Listening port, and switches for UPnP, DHT and local peer discovery. What the DHT learns is kept in the app's own data folder.
+- Listening port, and switches for UPnP, NAT-PMP, DHT and local peer discovery. What the DHT learns is kept in the app's own data folder.
 - uTP: also connect to peers over UDP. Off by default.
 - SOCKS5 proxy.
-- IP block list, and "ban this peer" in the peers view.
+- IP block list, and "ban this peer" in the peers view. Changing either takes effect without restarting the engine.
 - Network interface binding, for use with a VPN: choose one interface in Settings and all torrent traffic and feed reading goes through it. When that interface is not connected, the torrent engine is stopped, so nothing is sent or received until it is back; the window shows a red banner saying so.
 
 The window
@@ -69,19 +72,22 @@ The window
 - Dark and light themes.
 - When a download finishes: a notification, and optionally a program is run (`%N` is the torrent's name, `%F` its folder). When all downloads finish, the app can quit, or put the computer to sleep or shut it down after a 30-second countdown that can be cancelled.
 - Keeps the Mac awake while transferring, if switched on.
+- An optional menu-bar icon (macOS): with it on, closing the window keeps downloads going, and the icon's menu shows the speeds and can pause, resume or quit.
+- VoiceOver names for the speed graphs, the piece strip and each row's state.
 
 Remote control
 
 - A small web page, served by the app itself, for a browser or phone. It can also switch slow mode and set the seeding and queue limits. It is off until you turn it on in Settings and set a password. See [Remote control](#remote-control).
 - A part of qBittorrent's Web API on the same port and password, so Sonarr, Radarr and phone apps made for qBittorrent can use RustTorrent. Point them at the same address; any user name works.
+- AppleScript (macOS): add a torrent, pause or resume torrents, and list them. Shortcuts can run these through its "Run AppleScript" action.
 
 ## Size and speed
 
-Measured on an Apple Silicon Mac. Size with 0.13.4, the rest with 0.13.3:
+Measured on an Apple Silicon Mac. Size with 0.14.0, the rest with 0.13.3:
 
 | | Measured | Target |
 | --- | --- | --- |
-| App on disk | 14 MB (6.8 MB zipped) | under 15 MB |
+| App on disk | 14.5 MB (7.0 MB zipped) | under 15 MB |
 | Memory with one finished 735 MB torrent seeding | 49–53 MB footprint | under 100 MB |
 | Test download (735 MB Debian image) | finished in under 25 seconds, checksum matched | |
 
@@ -167,7 +173,7 @@ cargo test --workspace
 - Torrents are added to the engine one at a time. Many added at once (a dropped batch, a watch folder, an import) queue for a moment. The engine gave two adds at the same moment the same number, and called the second one a duplicate.
 - While a torrent's data is being moved it cannot be removed, and its transfers stop until the move ends.
 - A torrent stopped by a seeding time limit stays stopped when resumed, until the limit is raised.
-- On macOS the proxy password is kept in the Keychain; on other systems it is kept as plain text in the settings file. The block list is read only when the engine starts. Changing a network setting restarts the engine, which interrupts transfers for a moment.
+- On macOS the proxy password is kept in the Keychain; on other systems it is kept as plain text in the settings file. Changing a network setting other than NAT-PMP, the block list or banned peers restarts the engine, which interrupts transfers for a moment.
 - The finish notification was never seen: macOS refused notification permission to the locally signed app on the test Mac. Keeping the Mac awake was not confirmed by measurement. The proxy and the block list were checked by automated tests only.
 - The menu-bar icon (macOS, off by default) was tested by building only, not by hand: closing the window, reopening it from the icon or the Dock, and Pause All and Resume All still need a try.
 - The qBittorrent API was tested with automated tests over a real connection, not with real Sonarr, Radarr or phone apps. A folder given on add (`savepath`) is ignored, and moving a torrent (`setLocation`) and changing preferences are refused. Tags given on add are ignored. Some numbers it reports are estimates: seeds and leechers are not told apart, and finish times, tracker status and piece counts are not known. A program in Docker that reaches the app under a host name other than `localhost`, a `.local` name or an IP address is refused by the host check; use the IP address.
