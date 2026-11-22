@@ -1633,10 +1633,13 @@ impl App {
             let (mut close, mut save) = (false, false);
             let core = &self.core;
             let snap = &self.snap;
+            // The body scrolls so the heading and the buttons stay on screen in a short window.
+            let tall = (ctx.content_rect().height() - 140.0).max(200.0);
             let response = egui::Modal::new(egui::Id::unique("settings")).show(ctx, |ui| {
                 ui.set_width(460.0);
                 ui.heading("Settings");
                 ui.add_space(6.0);
+                let problem = egui::ScrollArea::vertical().max_height(tall).show(ui, |ui| {
                 ui.label(RichText::new("New torrents are saved to").weak());
                 ui.horizontal(|ui| {
                     let start = &snap.settings.download_dir;
@@ -2013,6 +2016,8 @@ impl App {
                         .small()
                         .weak(),
                 );
+                problem
+                }).inner;
                 ui.add_space(4.0);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let button = egui::Button::new(RichText::new("Save").strong());

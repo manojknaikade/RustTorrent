@@ -30,6 +30,11 @@ pub fn use_keychain() {
     ON.store(cfg!(target_os = "macos"), Ordering::Relaxed);
 }
 
+/// True while the proxy password lives in the Keychain rather than in state.json.
+pub fn in_use() -> bool {
+    ON.load(Ordering::Relaxed)
+}
+
 /// For `skip_serializing_if`: true while the password lives in the Keychain.
 pub(crate) fn in_keychain(_password: &str) -> bool {
     ON.load(Ordering::Relaxed)

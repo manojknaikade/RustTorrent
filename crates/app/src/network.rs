@@ -270,7 +270,11 @@ fn body(ui: &mut egui::Ui, form: &mut Form, snap: &Snapshot) {
     );
     note(
         ui,
-        "The proxy password is kept in the settings file on this computer, never in the log.",
+        if rusttorrent_core::secrets::in_use() {
+            "The proxy password is kept in the Keychain, never in the settings file or the log."
+        } else {
+            "The proxy password is kept in the settings file on this computer, never in the log."
+        },
     );
 
     ui.add_space(6.0);
